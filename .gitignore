@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+target/
+pkg/
+
+# Cloudflare
+.wrangler/
+.dev.vars
+.dev.vars.*
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Tauri
+apps/desktop/src-tauri/gen/
+
+# Editors and OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs and coverage
+*.log
+coverage/
