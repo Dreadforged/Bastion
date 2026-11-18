@@ -1,0 +1,17 @@
+[package]
+name = "bastion-crypto"
+version = "0.0.0"
+description = "Bastion end-to-end encryption core (MLS via OpenMLS), compiled to WASM for clients."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Stub: OpenMLS and wasm-bindgen are wired in when the encryption core lands.
+# openmls = "0.7"
+# openmls_rust_crypto = "0.4"
+# wasm-bindgen = "0.2"
