@@ -1,0 +1,27 @@
+{
+  "name": "bastion",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "version": "0.0.0",
+  "description": "Open source, privacy-first chat and community platform.",
+  "workspaces": [
+    "workers/shared",
+    "workers/durable",
+    "workers/api",
+    "apps/web",
+    "apps/desktop"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "dev:api": "npm run dev -w @bastion/api",
+    "dev:web": "npm run dev -w @bastion/web"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2"
+  }
+}
