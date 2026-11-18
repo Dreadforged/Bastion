@@ -1,0 +1,13 @@
+[package]
+name = "bastion-desktop"
+version = "0.0.0"
+description = "Bastion desktop shell (Tauri). Loads the apps/web build."
+edition = "2021"
+license = "AGPL-3.0-only"
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }

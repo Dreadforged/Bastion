@@ -1,0 +1,21 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Bastion",
+  "version": "0.0.0",
+  "identifier": "com.dreadforged.bastion",
+  "build": {
+    "beforeDevCommand": "npm run dev -w @bastion/web",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm run build -w @bastion/web",
+    "frontendDist": "../../web/dist"
+  },
+  "app": {
+    "windows": [{ "title": "Bastion", "width": 1200, "height": 800 }],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' https: wss:; img-src 'self' data: blob:"
+    }
+  },
+  "bundle": {
+    "active": false
+  }
+}
