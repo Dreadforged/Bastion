@@ -1,0 +1,92 @@
+name = "bastion-api"
+main = "src/index.ts"
+compatibility_date = "2025-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Bindings are not inherited by [env.*] blocks, so each environment repeats them.
+# Replace the placeholder database ids after running `wrangler d1 create`.
+
+# ---------------------------------------------------------------- local dev
+[vars]
+ENVIRONMENT = "development"
+
+[[durable_objects.bindings]]
+name = "USER_SESSION"
+class_name = "UserSession"
+
+[[durable_objects.bindings]]
+name = "SERVER"
+class_name = "Server"
+
+[[durable_objects.bindings]]
+name = "CONVERSATION"
+class_name = "Conversation"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserSession", "Server", "Conversation"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "bastion-dev"
+database_id = "00000000-0000-0000-0000-000000000000"
+
+[[r2_buckets]]
+binding = "FILES"
+bucket_name = "bastion-files-dev"
+
+# ---------------------------------------------------------------- staging
+[env.staging]
+name = "bastion-api-staging"
+
+[env.staging.vars]
+ENVIRONMENT = "staging"
+
+[[env.staging.durable_objects.bindings]]
+name = "USER_SESSION"
+class_name = "UserSession"
+
+[[env.staging.durable_objects.bindings]]
+name = "SERVER"
+class_name = "Server"
+
+[[env.staging.durable_objects.bindings]]
+name = "CONVERSATION"
+class_name = "Conversation"
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "bastion-staging"
+database_id = "00000000-0000-0000-0000-000000000000"
+
+[[env.staging.r2_buckets]]
+binding = "FILES"
+bucket_name = "bastion-files-staging"
+
+# ---------------------------------------------------------------- production
+[env.production]
+name = "bastion-api-production"
+
+[env.production.vars]
+ENVIRONMENT = "production"
+
+[[env.production.durable_objects.bindings]]
+name = "USER_SESSION"
+class_name = "UserSession"
+
+[[env.production.durable_objects.bindings]]
+name = "SERVER"
+class_name = "Server"
+
+[[env.production.durable_objects.bindings]]
+name = "CONVERSATION"
+class_name = "Conversation"
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "bastion-production"
+database_id = "00000000-0000-0000-0000-000000000000"
+
+[[env.production.r2_buckets]]
+binding = "FILES"
+bucket_name = "bastion-files-production"
