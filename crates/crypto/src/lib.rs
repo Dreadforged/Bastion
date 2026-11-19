@@ -7,6 +7,8 @@
 pub mod client;
 pub mod padding;
 pub mod safety;
+#[cfg(target_arch = "wasm32")]
+pub mod wasm;
 
 pub use client::{Client, CommitOut, Incoming};
 pub use safety::safety_code;
