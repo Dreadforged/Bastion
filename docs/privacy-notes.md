@@ -20,6 +20,12 @@ Working notes for whoever writes the public privacy page and the marketing
 | Reports | Server Durable Object | Only the messages the reporter chose to send | 90 days after closing |
 | Audit log | Server Durable Object | Yes | 90 days |
 | Privacy settings | D1 `privacy_settings` | Yes | Until the account is deleted |
+| Age band (not a birth date), how it was learned, the month it expires, account state | D1 `users` | Yes | Until the account is deleted |
+| Country code (two letters, never an IP address) | D1 `users` | Yes | Until the account is deleted |
+| Age signals: kind, weight, date (no content) | D1 `age_signals` | Yes | 6 months |
+| Which version of the terms and policies you accepted, and when | D1 `terms_acceptances` | Yes | Until the account is deleted |
+| Legal holds on accounts, servers, files, reports | D1 `legal_holds` | Yes | Until released, then kept as a record |
+| Staff access log (who looked at or changed what) and region flag history | D1 `staff_access_log`, `safety_flag_log` | Yes | To be decided with the lawyer |
 | IP addresses | Not stored by us | n/a | Used as a rate limit key and never written down (see below) |
 
 ## Open question 1: routing metadata (answer for the page)
