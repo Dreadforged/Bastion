@@ -23,6 +23,16 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # The web tests for encryption run against the real WASM build and are
+      # skipped without it, so build it first.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - run: npm run build:wasm -w @bastion/web
       - run: npm run typecheck
       - run: npm test
       - run: npm run build -w @bastion/web
