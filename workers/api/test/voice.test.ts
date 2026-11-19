@@ -3,7 +3,7 @@ import type { Server, UserSession } from "@bastion/durable";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { World } from "../../durable/test/world.js";
 import { hashToken, newToken } from "../src/auth/crypto.js";
-import { handleServers } from "../src/servers/routes.js";
+import { cleanupLiveStreams, handleServers } from "../src/servers/routes.js";
 import { applyVoiceEffects, HttpLiveKitAdmin, issueToken, type LiveKitConfig } from "../src/voice/livekit.js";
 import { createTestD1 } from "./d1.js";
 import { FakeLiveKitAdmin } from "./fake-livekit.js";
@@ -397,5 +397,85 @@ describe("applyVoiceEffects", () => {
     spy.mockRestore();
     expect(failed).toBe(1);
     expect(calls).toEqual(["bad", "good"]);
+  });
+});
+
+// ------------------------------------------------------------------ one stream per account
+
+describe("one live stream per account", () => {
+  /** A second server where the guest also has a voice channel and STREAM. */
+  async function secondServer(t: Setup) {
+    const created = await call("POST", "/servers", { token: t.guest.token, body: { name: "Other" } });
+    const serverId = created.body.server.id as string;
+    const channel = await call("POST", `/servers/${serverId}/channels`, { token: t.guest.token, body: { name: "room", kind: "voice" } });
+    return { serverId, lounge: channel.body.id as string };
+  }
+
+  const goLive = (serverId: string, t: Setup) =>
+    call("PATCH", `/servers/${serverId}/voice`, { token: t.guest.token, body: { streaming: true } });
+
+  it("refuses a second stream in another server, and allows it after the first stops", async () => {
+    const t = await setup();
+    await allowStreaming(t);
+    const other = await secondServer(t);
+    await tokenRoute(t, t.lounge, { screenShare: true });
+    expect((await goLive(t.serverId, t)).status).toBe(200);
+
+    await call("POST", `/servers/${other.serverId}/voice/token`, { token: t.guest.token, body: { channelId: other.lounge, screenShare: true } });
+    expect((await goLive(other.serverId, t)).body).toEqual({ error: "too_many_streams" });
+    // The refused stream is not live there.
+    const list = await call("GET", `/servers/${other.serverId}/voice`, { token: t.guest.token });
+    expect(list.body.filter((s: schemas.VoiceState) => s.streaming)).toHaveLength(0);
+
+    await call("PATCH", `/servers/${t.serverId}/voice`, { token: t.guest.token, body: { streaming: false } });
+    expect((await goLive(other.serverId, t)).status).toBe(200);
+  });
+
+  it("lets the same stream keep renewing, and frees the slot when the person leaves", async () => {
+    const t = await setup();
+    await allowStreaming(t);
+    const other = await secondServer(t);
+    await tokenRoute(t, t.lounge, { screenShare: true });
+    expect((await goLive(t.serverId, t)).status).toBe(200);
+    world.now += 30_000;
+    expect((await call("PATCH", `/servers/${t.serverId}/voice`, { token: t.guest.token, body: {} })).status).toBe(200);
+    expect((await goLive(t.serverId, t)).status).toBe(200);
+
+    await call("DELETE", `/servers/${t.serverId}/voice`, { token: t.guest.token });
+    await call("POST", `/servers/${other.serverId}/voice/token`, { token: t.guest.token, body: { channelId: other.lounge, screenShare: true } });
+    expect((await goLive(other.serverId, t)).status).toBe(200);
+  });
+
+  it("frees the slot by itself if the client stops renewing", async () => {
+    const t = await setup();
+    await allowStreaming(t);
+    const other = await secondServer(t);
+    await tokenRoute(t, t.lounge, { screenShare: true });
+    expect((await goLive(t.serverId, t)).status).toBe(200);
+    world.now += 91_000; // a voice lease is 90 seconds
+    await call("POST", `/servers/${other.serverId}/voice/token`, { token: t.guest.token, body: { channelId: other.lounge, screenShare: true } });
+    expect((await goLive(other.serverId, t)).status).toBe(200);
+  });
+
+  it("does not hold a slot for a stream that was refused", async () => {
+    const t = await setup(); // guest has no STREAM
+    const other = await secondServer(t);
+    await tokenRoute(t);
+    expect((await goLive(t.serverId, t)).status).toBe(403);
+    await call("POST", `/servers/${other.serverId}/voice/token`, { token: t.guest.token, body: { channelId: other.lounge, screenShare: true } });
+    expect((await goLive(other.serverId, t)).status).toBe(200);
+  });
+
+  it("is not shared between accounts, and cleanup removes lapsed rows", async () => {
+    const t = await setup();
+    await allowStreaming(t);
+    await tokenRoute(t, t.lounge, { screenShare: true });
+    expect((await goLive(t.serverId, t)).status).toBe(200);
+    // The owner is a different account with its own slot, even while the guest is live.
+    await tokenRoute(t, t.lounge, {}, t.owner);
+    expect((await call("PATCH", `/servers/${t.serverId}/voice`, { token: t.owner.token, body: { streaming: true } })).status).toBe(200);
+    world.now += 200_000;
+    await cleanupLiveStreams(db, world.now);
+    expect((await db.prepare("SELECT COUNT(*) AS n FROM live_streams").first<{ n: number }>())!.n).toBe(0);
   });
 });

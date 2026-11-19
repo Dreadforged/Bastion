@@ -299,7 +299,15 @@ export async function handleServers(request: Request, deps: ServerRouteDeps): Pr
           // A server under a legal hold cannot be deleted until staff release it.
           if (op.type === "server.delete") await assertNotHeld(deps.db, "server", serverId);
           if (op.type === "voice.join" && !deps.voice) throw new HttpError(503, "voice_unavailable");
+          // One live stream per account, across servers.
+          const startsStream = op.type === "voice.update" && op.body.streaming === true;
+          if (startsStream && !(await claimStream(deps.db, principal.userId, serverId, deps.now()))) throw new HttpError(409, "too_many_streams");
           const r = await handle(serverId, op);
+          if (op.type === "voice.update" || op.type === "voice.leave") {
+            const live = op.type === "voice.update" && r.status === 200 && (r.body as { streaming?: boolean }).streaming === true;
+            if (live) await claimStream(deps.db, principal.userId, serverId, deps.now());
+            else await releaseStream(deps.db, principal.userId, serverId);
+          }
           await applyEffects(deps, serverId, r);
           if (deps.voice) await applyVoiceEffects(deps.voice.admin, r.effects?.voice);
           if (op.type === "voice.join" && r.status === 200 && deps.voice) return await voiceToken(deps.voice, deps.now(), r.body);
@@ -313,6 +321,31 @@ export async function handleServers(request: Request, deps: ServerRouteDeps): Pr
     if (err instanceof HttpError || err instanceof AuthError) return json({ error: err.code }, err.status);
     throw err;
   }
+}
+
+/**
+ * Take or renew the account's one live stream slot. False if a stream in
+ * another server holds it. A slot not renewed within a voice lease is free.
+ */
+async function claimStream(db: D1Database, userId: string, serverId: string, now: number): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `INSERT INTO live_streams (user_id, server_id, expires_at) VALUES (?1, ?2, ?3)
+       ON CONFLICT (user_id) DO UPDATE SET server_id = ?2, expires_at = ?3
+       WHERE live_streams.server_id = ?2 OR live_streams.expires_at <= ?4`,
+    )
+    .bind(userId, serverId, now + schemas.VOICE_LIMITS.leaseSeconds * 1000, now)
+    .run();
+  return (result.meta?.changes ?? 0) > 0;
+}
+
+async function releaseStream(db: D1Database, userId: string, serverId: string): Promise<void> {
+  await db.prepare("DELETE FROM live_streams WHERE user_id = ? AND server_id = ?").bind(userId, serverId).run();
+}
+
+/** Drop lapsed stream slots. Run from the cron trigger. */
+export async function cleanupLiveStreams(db: D1Database, now: number): Promise<void> {
+  await db.prepare("DELETE FROM live_streams WHERE expires_at <= ?").bind(now).run();
 }
 
 /** Drop lapsed invite codes from the index. Run from the cron trigger. */
