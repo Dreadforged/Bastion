@@ -181,6 +181,88 @@ describe("server routes", () => {
   });
 });
 
+describe("moderation routes", () => {
+  async function setup() {
+    const owner = await signedIn();
+    const member = await signedIn();
+    const created = await call("POST", "/servers", { token: owner.token, body: { name: "Home" } });
+    const serverId = created.body.server.id as string;
+    const general = created.body.channels[0].id as string;
+    const code = (await call("POST", `/servers/${serverId}/invites`, { token: owner.token, body: { maxUses: 1 } })).body.code;
+    await call("POST", `/invites/${code}`, { token: member.token });
+    return { owner, member, serverId, general };
+  }
+
+  it("times out and lifts a timeout", async () => {
+    const { owner, member, serverId, general } = await setup();
+    const path = `/servers/${serverId}/members/${member.userId}/timeout`;
+    const put = await call("PUT", path, { token: owner.token, body: { seconds: 60, reason: "calm down" } });
+    expect(put).toMatchObject({ status: 200, body: { userId: member.userId, timeoutUntil: world.now + 60_000 } });
+    const blocked = await call("POST", `/servers/${serverId}/channels/${general}/messages`, {
+      token: member.token,
+      body: { ciphertext: btoa("hi"), epoch: 0 },
+    });
+    expect(blocked.status).toBe(403);
+    expect((await call("PUT", path, { token: owner.token, body: { seconds: 0 } })).status).toBe(400);
+    expect((await call("DELETE", path, { token: owner.token })).body.timeoutUntil).toBeNull();
+  });
+
+  it("kicks with a reason and needs an idempotency key", async () => {
+    const { owner, member, serverId } = await setup();
+    const path = `/servers/${serverId}/members/${member.userId}`;
+    expect((await call("DELETE", path, { token: owner.token, key: null })).status).toBe(400);
+    expect((await call("DELETE", path, { token: owner.token, body: { reason: "bye" } })).status).toBe(204);
+    const log = await call("GET", `/servers/${serverId}/audit-log?action=member.kick`, { token: owner.token });
+    expect(log.body).toEqual([expect.objectContaining({ action: "member.kick", targetId: member.userId, reason: "bye" })]);
+  });
+
+  it("bans, lists bans and unbans", async () => {
+    const { owner, member, serverId } = await setup();
+    const path = `/servers/${serverId}/bans/${member.userId}`;
+    expect((await call("PUT", path, { token: owner.token, body: { reason: "spam", deleteMessageSeconds: 3600 } })).status).toBe(204);
+    const bans = await call("GET", `/servers/${serverId}/bans?limit=5`, { token: owner.token });
+    expect(bans.body).toEqual([expect.objectContaining({ userId: member.userId, reason: "spam" })]);
+    expect((await call("GET", `/servers/${serverId}/bans?limit=500`, { token: owner.token })).status).toBe(400);
+    expect((await call("DELETE", path, { token: owner.token })).status).toBe(204);
+    expect((await call("GET", `/servers/${serverId}/bans`, { token: owner.token })).body).toEqual([]);
+  });
+
+  it("files, lists and resolves reports", async () => {
+    const { owner, member, serverId, general } = await setup();
+    const sent = await call("POST", `/servers/${serverId}/channels/${general}/messages`, {
+      token: owner.token,
+      body: { ciphertext: btoa("hi"), epoch: 0 },
+    });
+    const filed = await call("POST", `/servers/${serverId}/reports`, {
+      token: member.token,
+      body: { channelId: general, category: "spam", note: "keeps posting links", messages: [{ id: sent.body.id, content: "buy now" }] },
+    });
+    expect(filed).toMatchObject({ status: 201, body: { status: "open" } });
+    expect((await call("GET", `/servers/${serverId}/reports`, { token: member.token })).status).toBe(403);
+
+    const list = await call("GET", `/servers/${serverId}/reports?status=open`, { token: owner.token });
+    expect(list.body).toEqual([expect.objectContaining({ id: filed.body.id, note: "keeps posting links" })]);
+    const resolved = await call("PATCH", `/servers/${serverId}/reports/${filed.body.id}`, { token: owner.token, body: { status: "resolved" } });
+    expect(resolved.body.status).toBe("resolved");
+    expect((await call("PATCH", `/servers/${serverId}/reports/${filed.body.id}`, { token: owner.token, body: { status: "gone" } })).status).toBe(400);
+  });
+
+  it("sets slow mode on a channel", async () => {
+    const { owner, serverId, general } = await setup();
+    const res = await call("PATCH", `/servers/${serverId}/channels/${general}`, { token: owner.token, body: { slowModeSeconds: 30 } });
+    expect(res.body.slowModeSeconds).toBe(30);
+  });
+
+  it("deletes a server and drops its invite codes from the index", async () => {
+    const { owner, member, serverId } = await setup();
+    const code = (await call("POST", `/servers/${serverId}/invites`, { token: owner.token, body: {} })).body.code;
+    expect((await call("DELETE", `/servers/${serverId}`, { token: member.token })).status).toBe(403);
+    expect((await call("DELETE", `/servers/${serverId}`, { token: owner.token })).status).toBe(204);
+    expect(await inviteIndex(code)).toBeNull();
+    expect((await call("GET", `/servers/${serverId}/audit-log`, { token: owner.token })).status).toBe(404);
+  });
+});
+
 describe("gateway upgrade", () => {
   const upgrade = (protocols: string) => ({ upgrade: "websocket", "sec-websocket-protocol": protocols });
 
