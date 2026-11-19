@@ -1,0 +1,40 @@
+# Local load test only: `node test/load/run.mjs`. Never deployed.
+name = "bastion-api-load"
+main = "entry.ts"
+compatibility_date = "2025-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+ENVIRONMENT = "development"
+RP_ID = "localhost"
+RP_NAME = "Bastion (load test)"
+APP_ORIGIN = "http://localhost:5173"
+
+[[durable_objects.bindings]]
+name = "USER_SESSION"
+class_name = "UserSession"
+
+[[durable_objects.bindings]]
+name = "SERVER"
+class_name = "Server"
+
+[[durable_objects.bindings]]
+name = "CONVERSATION"
+class_name = "Conversation"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserSession", "Server", "Conversation"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "bastion-load"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "../../migrations"
+
+[[r2_buckets]]
+binding = "FILES"
+bucket_name = "bastion-files-load"
+
+# No rate limit bindings: the load test measures Durable Object traffic, and
+# the per-user limits inside the Server object still apply.
