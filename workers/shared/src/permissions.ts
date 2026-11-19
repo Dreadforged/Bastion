@@ -21,7 +21,8 @@ export const Permission = {
   CREATE_INVITE: 1n << 12n,
   VIEW_AUDIT_LOG: 1n << 13n,
   ADMINISTRATOR: 1n << 14n,
-  // Reserved for screen share (post-v1): STREAM: 1n << 15n
+  /** Screen share in a voice channel. Not in the default @everyone set. */
+  STREAM: 1n << 15n,
 } as const;
 
 export type PermissionName = keyof typeof Permission;

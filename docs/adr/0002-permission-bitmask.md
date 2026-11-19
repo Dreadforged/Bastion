@@ -15,8 +15,8 @@ and in D1), computed only in `workers/shared/src/permissions.ts`.
 
 v1 flags: VIEW_CHANNEL, SEND_MESSAGES, ATTACH_FILES, MANAGE_MESSAGES,
 CONNECT_VOICE, SPEAK, MUTE_MEMBERS, KICK, BAN, TIMEOUT, MANAGE_CHANNELS,
-MANAGE_ROLES, CREATE_INVITE, VIEW_AUDIT_LOG, ADMINISTRATOR. STREAM is reserved
-for screen share later.
+MANAGE_ROLES, CREATE_INVITE, VIEW_AUDIT_LOG, ADMINISTRATOR, STREAM (bit 15,
+screen share, added with voice and not in the default @everyone set).
 
 Resolution:
 
