@@ -16,7 +16,7 @@ Bastion's promise is that the voice server learns as little as possible.
 | Channel name, server name | No. Rooms are random 128-bit ids. |
 | User id, email, display name | No. Participants are random 128-bit ids, new for every join. |
 | Who is in which call, mapped to people | No. Only the Server object knows that, and only while the call is live. |
-| Audio and video content | Not readable once client-side E2EE lands (see ADR 0004). Until then it is encrypted in transit (DTLS-SRTP) but the server can see media. |
+| Audio and video content | Not readable for calls joined with client-side E2EE (ADR 0004; written but not yet run against a real LiveKit server or real browsers). A call joined without it is encrypted in transit (DTLS-SRTP) but the server can see media. |
 | Network addresses of participants | Unavoidably, to route packets. Not logged or kept (below). |
 
 ## Design rules
