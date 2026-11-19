@@ -9,6 +9,9 @@ compatibility_flags = ["nodejs_compat"]
 # ---------------------------------------------------------------- local dev
 [vars]
 ENVIRONMENT = "development"
+RP_ID = "localhost"
+RP_NAME = "Bastion (dev)"
+APP_ORIGIN = "http://localhost:5173"
 
 [[durable_objects.bindings]]
 name = "USER_SESSION"
@@ -35,12 +38,24 @@ database_id = "00000000-0000-0000-0000-000000000000"
 binding = "FILES"
 bucket_name = "bastion-files-dev"
 
+# Per-IP limit for unauthenticated /auth endpoints. IPs are only used as a
+# key here and are never stored.
+[[ratelimits]]
+name = "AUTH_RATE_LIMIT"
+namespace_id = "1001"
+simple = { limit = 30, period = 60 }
+
+# Hourly cleanup of expired enrollments, challenges and sessions.
+[triggers]
+crons = ["0 * * * *"]
+
 # ---------------------------------------------------------------- staging
 [env.staging]
 name = "bastion-api-staging"
 
 [env.staging.vars]
 ENVIRONMENT = "staging"
+# TODO: set RP_ID, RP_NAME and APP_ORIGIN once the staging domain is chosen.
 
 [[env.staging.durable_objects.bindings]]
 name = "USER_SESSION"
@@ -63,12 +78,24 @@ database_id = "00000000-0000-0000-0000-000000000000"
 binding = "FILES"
 bucket_name = "bastion-files-staging"
 
+# Per-IP limit for unauthenticated /auth endpoints. IPs are only used as a
+# key here and are never stored.
+[[env.staging.ratelimits]]
+name = "AUTH_RATE_LIMIT"
+namespace_id = "2001"
+simple = { limit = 30, period = 60 }
+
+# Hourly cleanup of expired enrollments, challenges and sessions.
+[env.staging.triggers]
+crons = ["0 * * * *"]
+
 # ---------------------------------------------------------------- production
 [env.production]
 name = "bastion-api-production"
 
 [env.production.vars]
 ENVIRONMENT = "production"
+# TODO: set RP_ID, RP_NAME and APP_ORIGIN once the production domain is chosen.
 
 [[env.production.durable_objects.bindings]]
 name = "USER_SESSION"
@@ -90,3 +117,14 @@ database_id = "00000000-0000-0000-0000-000000000000"
 [[env.production.r2_buckets]]
 binding = "FILES"
 bucket_name = "bastion-files-production"
+
+# Per-IP limit for unauthenticated /auth endpoints. IPs are only used as a
+# key here and are never stored.
+[[env.production.ratelimits]]
+name = "AUTH_RATE_LIMIT"
+namespace_id = "3001"
+simple = { limit = 30, period = 60 }
+
+# Hourly cleanup of expired enrollments, challenges and sessions.
+[env.production.triggers]
+crons = ["0 * * * *"]
