@@ -119,6 +119,7 @@ export default {
       conversations: env.CONVERSATION,
       now: Date.now,
       userLimit: env.API_RATE_LIMIT,
+      voice: voiceDeps(env),
     });
     if (conversations) return conversations;
 

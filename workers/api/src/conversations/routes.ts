@@ -5,6 +5,7 @@ import { toBase64Url } from "../auth/crypto.js";
 import { json } from "../auth/routes.js";
 import { authenticate, type Principal } from "../auth/sessions.js";
 import { body, HttpError, id, query } from "../http.js";
+import { applyVoiceEffects, issueToken, type VoiceDeps } from "../voice/livekit.js";
 import { claimKeyPackages, devicesBelong, identityKeys, stock, uploadKeyPackages } from "./keys.js";
 
 export interface ConversationRouteDeps {
@@ -13,6 +14,10 @@ export interface ConversationRouteDeps {
   now: () => number;
   /** Per-user request limit, keyed by user id. Optional in local dev. */
   userLimit?: RateLimit | undefined;
+  /** LiveKit settings and admin client. Without them starting or answering a call answers 503. */
+  voice?: VoiceDeps | undefined;
+  /** A user's plan, for screen share quality. Everyone is on free if unset. */
+  planFor?: ((userId: string) => Promise<schemas.Plan>) | undefined;
 }
 
 /**
@@ -115,6 +120,91 @@ async function create(deps: ConversationRouteDeps, principal: Principal, request
 }
 
 /**
+ * Calls in a direct message. The DM's conversation object holds the state and
+ * decides who may do what; this checks the call's key group against D1 and
+ * signs LiveKit tokens, which only the Worker can.
+ *
+ *   GET    /conversations/:id/call            the live call, if any
+ *   POST   /conversations/:id/call            ring the other person; returns a token for the caller
+ *   POST   /conversations/:id/call/accept     answer; returns a token for the callee
+ *   POST   /conversations/:id/call/decline
+ *   PATCH  /conversations/:id/call            keep an answered call alive
+ *   DELETE /conversations/:id/call            cancel a ring or hang up
+ */
+async function callRoute(
+  deps: ConversationRouteDeps,
+  principal: Principal,
+  cid: string,
+  action: string | undefined,
+  request: Request,
+): Promise<Response> {
+  const m = request.method;
+  const actor = { userId: principal.userId, deviceId: principal.deviceId };
+  const plan = async () => (await deps.planFor?.(principal.userId)) ?? "free";
+  let op: ConversationOpInput | null = null;
+  let wantsToken = false;
+
+  if (action === undefined && m === "GET") op = { type: "call.get" };
+  else if (action === undefined && m === "PATCH") op = { type: "call.renew" };
+  else if (action === undefined && m === "DELETE") op = { type: "call.end" };
+  else if (action === undefined && m === "POST") {
+    const req = await body(request, schemas.StartCallRequest);
+    await checkCallGroup(deps.db, cid, principal.userId, req.groupConversationId);
+    op = { type: "call.start", body: req, plan: await plan() };
+    wantsToken = true;
+  } else if (action === "accept" && m === "POST") {
+    op = { type: "call.accept", body: await body(request, schemas.AnswerCallRequest), plan: await plan() };
+    wantsToken = true;
+  } else if (action === "decline" && m === "POST") op = { type: "call.decline" };
+  if (!op) return json({ error: "not_found" }, 404);
+  if (wantsToken && !deps.voice) throw new HttpError(503, "voice_unavailable");
+
+  const stub = deps.conversations.get(deps.conversations.idFromName(cid));
+  const r = (await stub.handle(actor, op, null)) as unknown as ConversationReply;
+  if (deps.voice) await applyVoiceEffects(deps.voice.admin, r.effects?.voice);
+  if (wantsToken && r.status === 200 && deps.voice) {
+    const g = r.body as {
+      call: schemas.DmCall;
+      roomId: string;
+      participantId: string;
+      canPublish: boolean;
+      canShare: boolean;
+      quality: schemas.VoiceTokenResponse["quality"];
+    };
+    const { token, expiresAt } = await issueToken(deps.voice.config, g, deps.now());
+    const out: schemas.DmCallToken = { ...g, url: deps.voice.config.url, token, expiresAt };
+    return json(out);
+  }
+  return json(r.status === 204 ? null : r.body, r.status);
+}
+
+/**
+ * The call's key group must be a plain group of exactly these two people. A
+ * third member could compute the call's keys, and reusing the DM or a
+ * channel conversation would tie call keys to message history.
+ */
+async function checkCallGroup(db: D1Database, dmId: string, callerId: string, groupId: string): Promise<void> {
+  if (groupId === dmId) throw new HttpError(400, "invalid_request");
+  const { results: dm } = await db
+    .prepare("SELECT user_id FROM conversation_members WHERE conversation_id = ?")
+    .bind(dmId)
+    .all<{ user_id: string }>();
+  const pair = new Set(dm.map((r) => r.user_id));
+  if (pair.size !== 2 || !pair.has(callerId)) throw new HttpError(404, "not_found");
+  const { results: group } = await db
+    .prepare("SELECT user_id FROM conversation_members WHERE conversation_id = ?")
+    .bind(groupId)
+    .all<{ user_id: string }>();
+  const members = new Set(group.map((r) => r.user_id));
+  if (members.size !== 2 || ![...pair].every((u) => members.has(u))) throw new HttpError(400, "invalid_call_group");
+  const special = await db
+    .prepare("SELECT 1 AS x FROM dm_pairs WHERE conversation_id = ? UNION ALL SELECT 1 FROM channel_conversations WHERE conversation_id = ?")
+    .bind(groupId, groupId)
+    .first();
+  if (special) throw new HttpError(400, "invalid_call_group");
+}
+
+/**
  * Routes for MLS keys and encrypted conversations. Returns null for paths it
  * doesn't own.
  *
@@ -128,6 +218,7 @@ async function create(deps: ConversationRouteDeps, principal: Principal, request
  *   GET  /conversations/:id/envelopes?after=&limit=
  *   POST /conversations/:id/commits
  *   POST /conversations/:id/messages
+ *   .../call                       calls in a DM, see callRoute
  */
 export async function handleConversations(request: Request, deps: ConversationRouteDeps): Promise<Response | null> {
   const { pathname } = new URL(request.url);
@@ -172,6 +263,7 @@ export async function handleConversations(request: Request, deps: ConversationRo
       if (n === 1 && m === "POST") return await create(deps, principal, request);
 
       const cid = conversationId(parts[1]);
+      if (parts[2] === "call" && n <= 4) return await callRoute(deps, principal, cid, parts[3], request);
       const actor = { userId: principal.userId, deviceId: principal.deviceId };
       let op: ConversationOpInput | null = null;
       if (n === 2 && m === "GET") op = { type: "get" };

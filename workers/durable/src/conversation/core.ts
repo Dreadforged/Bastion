@@ -1,6 +1,8 @@
 import { newId, Permission as P, has, schemas, type GatewayEvent } from "@bastion/shared";
 import { z } from "zod";
 import { takeToken, type Bucket, type Storage } from "../storage.js";
+import type { VoiceEffect } from "../server/ops.js";
+import { CallError, CallLogic } from "./call.js";
 
 /**
  * MLS delivery service for one encrypted conversation.
@@ -38,6 +40,13 @@ export const ConversationOp = z.discriminatedUnion("type", [
   z.object({ type: z.literal("fetch"), query: schemas.EnvelopeQuery }),
   z.object({ type: z.literal("commit"), body: schemas.CommitRequest }),
   z.object({ type: z.literal("send"), body: schemas.SendMessageRequest }),
+  // Calls in a DM. `plan` is set by the Worker, never by a client.
+  z.object({ type: z.literal("call.start"), body: schemas.StartCallRequest, plan: schemas.Plan }),
+  z.object({ type: z.literal("call.accept"), body: schemas.AnswerCallRequest, plan: schemas.Plan }),
+  z.object({ type: z.literal("call.decline") }),
+  z.object({ type: z.literal("call.end") }),
+  z.object({ type: z.literal("call.renew") }),
+  z.object({ type: z.literal("call.get") }),
 ]);
 export type ConversationOp = z.infer<typeof ConversationOp>;
 export type ConversationOpInput = z.input<typeof ConversationOp>;
@@ -56,7 +65,7 @@ export interface ConversationInit {
 export interface ConversationReply {
   status: number;
   body: unknown;
-  effects?: { added?: string[]; removed?: string[] };
+  effects?: { added?: string[]; removed?: string[]; voice?: VoiceEffect[] };
 }
 
 export interface ConversationDeps {
@@ -123,12 +132,30 @@ export class ConversationCore {
   private readonly sql;
   private readonly buckets = new Map<string, Bucket>();
   private readonly permCache = new Map<string, { perms: bigint; at: number }>();
+  private readonly calls: CallLogic;
 
   constructor(
     private readonly storage: Storage,
     private readonly deps: ConversationDeps,
   ) {
     this.sql = storage.sql;
+    this.calls = new CallLogic({
+      storage,
+      now: () => deps.now(),
+      get conversationId() {
+        return self().conv()!.id;
+      },
+      peerOf: (userId) => {
+        const conv = this.conv();
+        if (conv?.kind !== "dm") fail(400, "not_a_dm");
+        this.requireMember(userId);
+        const peer = this.members().find((m) => m.user_id !== userId);
+        if (!peer) fail(404, "not_found");
+        return peer.user_id;
+      },
+      notify: (userIds, event) => deps.notify(userIds, event),
+    });
+    const self = () => this;
   }
 
   // ------------------------------------------------------------ reads
@@ -307,6 +334,24 @@ export class ConversationCore {
         case "commit":
           reply = await this.commit(actor, op.body, now, perms);
           break;
+        case "call.start":
+          reply = await this.call(() => this.calls.start(actor, { ...op.body, plan: op.plan }));
+          break;
+        case "call.accept":
+          reply = await this.call(() => this.calls.accept(actor, { ...op.body, plan: op.plan }));
+          break;
+        case "call.decline":
+          reply = await this.call(() => this.calls.decline(actor));
+          break;
+        case "call.end":
+          reply = await this.call(() => this.calls.hangUp(actor));
+          break;
+        case "call.renew":
+          reply = await this.call(() => this.calls.renew(actor));
+          break;
+        case "call.get":
+          reply = await this.call(() => this.calls.current(actor));
+          break;
       }
     } catch (err) {
       if (!(err instanceof Fail)) throw err;
@@ -363,6 +408,17 @@ export class ConversationCore {
     });
     if (marked.length > 0) await this.notify(this.readers(), this.lastSeq());
     return perms;
+  }
+
+  /** Run a call op. Its errors are replies; LiveKit clean-up rides in `effects` for the Worker. */
+  private async call(run: () => Promise<{ status: number; body: unknown; voice?: VoiceEffect[] }>): Promise<ConversationReply> {
+    try {
+      const r = await run();
+      return { status: r.status, body: r.body, ...(r.voice && r.voice.length > 0 ? { effects: { voice: r.voice } } : {}) };
+    } catch (err) {
+      if (err instanceof CallError) return { status: err.status, body: { error: err.code } };
+      throw err;
+    }
   }
 
   private requireMember(userId: string): MemberRow {

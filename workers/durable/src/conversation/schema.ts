@@ -58,4 +58,29 @@ export const CONVERSATION_MIGRATIONS: readonly string[] = [
   -- A signed-out device: cut off at revoked_seq until a commit removes its leaf.
   ALTER TABLE devices ADD COLUMN revoked_seq INTEGER;
   `,
+  `
+  -- Calls in a direct message, newest last. Only the latest one can be live.
+  -- room_id and the participant ids are random and are the only things LiveKit sees.
+  CREATE TABLE calls (
+    id                 TEXT PRIMARY KEY,
+    room_id            TEXT NOT NULL,
+    caller_id          TEXT NOT NULL,
+    callee_id          TEXT NOT NULL,
+    group_id           TEXT NOT NULL,        -- the call's MLS group conversation
+    caller_participant TEXT NOT NULL,
+    callee_participant TEXT NOT NULL,
+    caller_share       INTEGER NOT NULL,
+    callee_share       INTEGER NOT NULL DEFAULT 0,
+    caller_plan        TEXT NOT NULL,
+    callee_plan        TEXT,
+    answered_device    TEXT,                 -- the callee device that picked up
+    state              TEXT NOT NULL CHECK (state IN ('ringing', 'active', 'ended')),
+    end_reason         TEXT,
+    ring_expires_at    INTEGER NOT NULL,
+    lease_until        INTEGER NOT NULL,
+    created_at         INTEGER NOT NULL
+  );
+  CREATE INDEX calls_created ON calls (created_at);
+  CREATE UNIQUE INDEX calls_group ON calls (group_id);
+  `,
 ];
