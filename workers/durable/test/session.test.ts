@@ -164,17 +164,21 @@ describe("presence", () => {
   it("goes online on the first client and offline when the last one leaves", async () => {
     const ownerWs = world.connect(owner);
     await world.frame(ownerWs, { op: "identify" });
+    await world.settle();
     ownerWs.clear();
 
     const phone = world.connect(alice);
     const laptop = world.connect(alice);
     await world.frame(phone, { op: "identify" });
     await world.frame(laptop, { op: "identify" });
+    await world.settle();
     expect(ownerWs.dispatches().map((d) => d.d)).toEqual([{ serverId, userId: alice, status: "online" }]);
 
     await world.disconnect(phone);
+    await world.settle();
     expect(ownerWs.dispatches()).toHaveLength(1);
     await world.disconnect(laptop);
+    await world.settle();
     expect(ownerWs.dispatches().at(-1)?.d).toEqual({ serverId, userId: alice, status: "offline" });
   });
 
@@ -183,9 +187,11 @@ describe("presence", () => {
     await world.frame(ownerWs, { op: "identify" });
     const ws = world.connect(alice);
     await world.frame(ws, { op: "identify" });
+    await world.settle();
     ownerWs.clear();
 
     await world.session(alice).core.setStatus(alice, "invisible", [ws]);
+    await world.settle();
     expect(ownerWs.dispatches().map((d) => d.d.status)).toEqual(["offline"]);
     const snapshot = world.server(serverId).snapshot(owner)!;
     expect(snapshot.presences.map((p) => p.userId)).not.toContain(alice);

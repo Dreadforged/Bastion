@@ -33,6 +33,7 @@ beforeEach(async () => {
   aliceWs = await connect(alice);
   bobWs = await connect(bob);
   // Drop the presence updates from connecting.
+  await world.settle();
   for (const ws of [modWs, aliceWs, bobWs]) ws.clear();
 });
 

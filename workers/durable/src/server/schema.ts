@@ -170,4 +170,13 @@ export const SERVER_MIGRATIONS: readonly string[] = [
   -- Recipient must still hold these permissions (in channel_id when set).
   ALTER TABLE outbox ADD COLUMN permission TEXT;
   `,
+  `
+  -- Batched delivery. A row is not sent before ready_at, unless a later row
+  -- for the same recipient goes out first. A newer row with the same
+  -- coalesce_key replaces an unsent one (presence keeps only the latest).
+  ALTER TABLE outbox ADD COLUMN ready_at INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE outbox ADD COLUMN coalesce_key TEXT;
+  CREATE INDEX outbox_coalesce ON outbox (coalesce_key);
+  CREATE INDEX outbox_ready ON outbox (ready_at);
+  `,
 ];
