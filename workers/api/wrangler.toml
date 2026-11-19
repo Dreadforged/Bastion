@@ -16,6 +16,10 @@ ENVIRONMENT = "development"
 RP_ID = "localhost"
 RP_NAME = "Bastion (dev)"
 APP_ORIGIN = "http://localhost:5173"
+# Staff admin tool (/staff), behind Cloudflare Access. Leave unset and the routes answer 404.
+# STAFF_ACCESS_TEAM_DOMAIN = "yourteam.cloudflareaccess.com"
+# STAFF_ACCESS_AUDIENCE = "<the Access application AUD tag>"
+# STAFF_EMAILS = "a@example.com,b@example.com"   # optional second check
 
 [[durable_objects.bindings]]
 name = "USER_SESSION"

@@ -4,6 +4,7 @@ import { AuthError } from "../auth/errors.js";
 import { limitAccount } from "../auth/rate-limit.js";
 import { json } from "../auth/routes.js";
 import { authenticate } from "../auth/sessions.js";
+import { requireWritable } from "../safety/enforce.js";
 import { body, HttpError, id } from "../http.js";
 import type { UploadSigner } from "./presign.js";
 import type { ImageScanner } from "./scanner.js";
@@ -219,6 +220,7 @@ export async function handleFiles(request: Request, deps: FileRouteDeps): Promis
       const { success } = await deps.userLimit.limit({ key: principal.userId });
       if (!success) throw new HttpError(429, "rate_limited");
     }
+    requireWritable(principal, request.method);
     const userId = principal.userId;
 
     if (parts.length === 2 && parts[1] === "uploads" && m === "POST") return await createUpload(request, deps, userId);

@@ -146,7 +146,14 @@ export const MODULE_CONFIG = {
   reports: z.object({}).strict(),
   public_scan: z.object({}).strict(),
   reporting_out: z.object({}).strict(),
-  contact: z.object({}).strict(),
+  contact: z
+    .object({
+      /** Whether a DM from a stranger can start as a request. When off, `requests` behaves like `nobody` for strangers. */
+      messageRequests: z.boolean().default(true),
+      /** The DM policy for 13 to 17 year olds who have not chosen one, and the loosest they may choose. */
+      teenDmPolicy: z.enum(["requests", "nobody"]).default("requests"),
+    })
+    .strict(),
   blocklists: z.object({}).strict(),
   authorities: z.object({}).strict(),
   transparency: z.object({}).strict(),
@@ -207,3 +214,79 @@ export const LegalHold = z.object({
   releasedAt: z.number().int().nullable(),
 });
 export type LegalHold = z.infer<typeof LegalHold>;
+
+// ------------------------------------------------------------------ what limited accounts may do
+
+/** Accounts that cannot use features that write: restricted ones may only read and export. */
+export const READ_ONLY_STATES: readonly AccountState[] = ["restricted"];
+
+/** Accounts that cannot start new contact: DMs, calls, joining servers, creating servers. */
+export const NO_NEW_CONTACT_STATES: readonly AccountState[] = ["restricted", "pending_age_review"];
+
+/**
+ * Whether age restricted channels are hidden from this account. True unless the
+ * account is active and confirmed or declared 18 and over.
+ */
+export function isAgeLimited(state: AccountState, band: AgeBand): boolean {
+  return state !== "active" || band !== "18plus";
+}
+
+// ------------------------------------------------------------------ staff admin requests
+
+export const StaffSetStateRequest = z.object({
+  state: AccountState,
+  reasonCode: ReasonCode,
+});
+export type StaffSetStateRequest = z.infer<typeof StaffSetStateRequest>;
+
+/** How a staff member closes an age review. `cleared` records that a stronger check showed 18 or over. */
+export const StaffResolveAgeReviewRequest = z.discriminatedUnion("outcome", [
+  z.object({ outcome: z.literal("cleared") }),
+  z.object({ outcome: z.literal("restrict") }),
+  z.object({ outcome: z.literal("remove") }),
+]);
+export type StaffResolveAgeReviewRequest = z.infer<typeof StaffResolveAgeReviewRequest>;
+
+export const StaffSetFlagRequest = z.object({
+  module: SafetyModule,
+  region: Region,
+  enabled: z.boolean(),
+  config: z.record(z.string(), z.unknown()).default({}),
+});
+export type StaffSetFlagRequest = z.infer<typeof StaffSetFlagRequest>;
+
+export const StaffPlaceHoldRequest = z.object({
+  subjectType: HoldSubjectType,
+  subjectId: z.string().min(1).max(64),
+  reasonCode: ReasonCode,
+  reference: z.string().max(128).nullable().default(null),
+  /** Required for a report hold: the server whose object stores the report. */
+  serverId: Id.optional(),
+});
+export type StaffPlaceHoldRequest = z.infer<typeof StaffPlaceHoldRequest>;
+
+export const StaffAccountListQuery = z.object({
+  state: AccountState.optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+});
+
+/** Deleting an account needs the person to say so explicitly. */
+export const DeleteAccountRequest = z.object({ confirm: z.literal("delete my account") }).strict();
+export type DeleteAccountRequest = z.infer<typeof DeleteAccountRequest>;
+
+// ------------------------------------------------------------------ message requests and teen defaults
+
+/** The bands that get teen defaults. An unknown band is not here: those accounts are held at the age screen. */
+export function isTeenBand(band: AgeBand): boolean {
+  return band === "13to15" || band === "16to17";
+}
+
+export const MessageRequest = z.object({
+  conversationId: z.string(),
+  /** The person asking to message you. */
+  from: Id,
+});
+export type MessageRequest = z.infer<typeof MessageRequest>;
+
+/** Messages a requester may send before the recipient accepts. */
+export const MESSAGE_REQUEST_SENDS = 1;

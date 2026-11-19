@@ -3,6 +3,8 @@ import type { Reply, Server, ServerOpInput, UserSession } from "@bastion/durable
 import { SESSION_HEADERS } from "@bastion/durable/env";
 import { getPrivacy } from "../account/privacy.js";
 import { getClientConfig } from "../safety/account.js";
+import { requireNewContact, requireWritable, syncAgeLimit } from "../safety/enforce.js";
+import { assertNotHeld } from "../safety/holds.js";
 import type { FlagReader } from "../safety/flags.js";
 import type { z } from "zod";
 import { AuthError } from "../auth/errors.js";
@@ -238,6 +240,8 @@ export async function handleServers(request: Request, deps: ServerRouteDeps): Pr
       const { success } = await deps.userLimit.limit({ key: principal.userId });
       if (!success) throw new HttpError(429, "rate_limited");
     }
+    // Restricted accounts read and export only. Leaving a server is still allowed.
+    if (!(request.method === "DELETE" && parts[2] === "members" && parts[3] === "@me")) requireWritable(principal, request.method);
     const key = idempotencyKey(request);
     const session = () => deps.sessions.get(deps.sessions.idFromName(principal.userId));
     // RPC return types lose `unknown` fields, so replies are re-typed here.
@@ -259,6 +263,12 @@ export async function handleServers(request: Request, deps: ServerRouteDeps): Pr
         | undefined;
       if (!type) return json({ error: "not_found" }, 404);
       const serverId = await inviteServer(deps, code);
+      if (type === "invite.accept") {
+        requireNewContact(principal);
+        // A limited account must not see age restricted channels from its first moment in the server.
+        const limited = schemas.isAgeLimited(principal.accountState, principal.ageBand);
+        if (limited) await deps.servers.get(deps.servers.idFromName(serverId)).setAgeLimit(principal.userId, true);
+      }
       const r = await handle(serverId, { type, code });
       // The object found the code gone or lapsed: drop it from the index too.
       const lapsed = r.status === 404 && (r.body as { error?: string } | null)?.error === "unknown_invite";
@@ -269,6 +279,7 @@ export async function handleServers(request: Request, deps: ServerRouteDeps): Pr
 
     if (root === "servers") {
       if (parts.length === 1 && request.method === "POST") {
+        requireNewContact(principal);
         if (!key) throw new HttpError(400, "idempotency_key_required");
         const { name } = await body(request, schemas.CreateServerRequest);
         const r = (await session().createServer(principal.userId, key, name)) as unknown as Reply;
@@ -285,6 +296,8 @@ export async function handleServers(request: Request, deps: ServerRouteDeps): Pr
             const config = deps.flags ? await getClientConfig(deps.db, deps.flags, principal.userId) : null;
             if (!config?.ageRestrictedChannels) throw new HttpError(403, "age_restricted_channels_disabled");
           }
+          // A server under a legal hold cannot be deleted until staff release it.
+          if (op.type === "server.delete") await assertNotHeld(deps.db, "server", serverId);
           if (op.type === "voice.join" && !deps.voice) throw new HttpError(503, "voice_unavailable");
           const r = await handle(serverId, op);
           await applyEffects(deps, serverId, r);

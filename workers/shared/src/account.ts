@@ -8,8 +8,11 @@ import { Id } from "./ids.js";
  * repeated here. These are the other choices a person has.
  */
 
-/** Who may start a new DM with you. Existing DMs keep working. */
-export const DmPolicy = z.enum(["everyone", "nobody"]);
+/**
+ * Who may start a new DM with you. Existing DMs keep working.
+ * `requests`: people who share a server with you can message you; anyone else sends a request you accept or decline.
+ */
+export const DmPolicy = z.enum(["everyone", "requests", "nobody"]);
 export type DmPolicy = z.infer<typeof DmPolicy>;
 
 export const PrivacySettings = z.object({

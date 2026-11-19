@@ -117,6 +117,8 @@ interface Snapshot {
   overrides: Map<string, OverrideRow[]>;
   /** Members in a timeout right now, to when it ends. */
   timeouts: Map<string, number>;
+  /** Members the platform has limited by age: they cannot see age restricted channels. */
+  ageLimited: Set<string>;
 }
 
 interface Emit {
@@ -308,7 +310,8 @@ export class ServerCore {
       list.push(o);
       overrides.set(o.channel_id, list);
     }
-    return { serverId: server.id, ownerId: server.owner_id, roles, members, channels, overrides, timeouts };
+    const ageLimited = new Set(this.sql.exec<{ user_id: string }>("SELECT user_id FROM member_age_limits").toArray().map((r) => r.user_id));
+    return { serverId: server.id, ownerId: server.owner_id, roles, members, channels, overrides, timeouts, ageLimited };
   }
 
   // ------------------------------------------------------------ permissions
@@ -345,7 +348,10 @@ export class ServerCore {
   }
 
   private channelPermissions(snap: Snapshot, userId: string, channelId: string): bigint {
-    if (!snap.members.has(userId) || !snap.channels.has(channelId)) return 0n;
+    const channel = snap.channels.get(channelId);
+    if (!snap.members.has(userId) || !channel) return 0n;
+    // Every check, including the one before delivery, hides age restricted channels from limited accounts.
+    if (channel.age_restricted === 1 && snap.ageLimited.has(userId)) return 0n;
     return computePermissions(this.context(snap, userId, channelId));
   }
 
@@ -1692,6 +1698,15 @@ export class ServerCore {
    */
   private retentionMs(): number {
     return this.deps.retentionMs?.() ?? ML.retentionMs;
+  }
+
+  /**
+   * Mark a user as limited by age (an unconfirmed or under-18 band, or an account under review),
+   * so age restricted channels disappear for them. Called by the Worker, never by a member.
+   */
+  setAgeLimit(userId: string, limited: boolean): void {
+    if (limited) this.sql.exec("INSERT OR IGNORE INTO member_age_limits (user_id) VALUES (?)", userId);
+    else this.sql.exec("DELETE FROM member_age_limits WHERE user_id = ?", userId);
   }
 
   /**

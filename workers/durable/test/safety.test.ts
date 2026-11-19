@@ -183,3 +183,49 @@ describe("report hold", () => {
 
 // Keeps the permission import honest: the owner holds everything these tests need.
 void P;
+
+describe("age limits", () => {
+  async function adultsChannel(): Promise<string> {
+    const made = await world.op(serverId, owner, { type: "channel.create", body: { name: "adults", ageRestricted: true } });
+    expect(made.status).toBe(201);
+    return made.body.id as string;
+  }
+  const send = (userId: string, channelId: string) =>
+    world.op(serverId, userId, { type: "message.create", channelId, body: { ciphertext: ciphertext(), epoch: 0 } });
+
+  it("hides age restricted channels from a limited member, in the snapshot and in every operation", async () => {
+    const adults = await adultsChannel();
+    expect(world.server(serverId).snapshot(alice)!.channels.map((c) => c.id)).toContain(adults);
+    expect((await send(alice, adults)).status).toBe(201);
+
+    world.server(serverId).setAgeLimit(alice, true);
+    expect(world.server(serverId).snapshot(alice)!.channels.map((c) => c.id)).not.toContain(adults);
+    expect(world.server(serverId).snapshot(alice)!.channels.map((c) => c.id)).toContain(general);
+    expect(await send(alice, adults)).toMatchObject({ status: 404, body: { error: "unknown_channel" } });
+    expect((await world.op(serverId, alice, { type: "messages.list", channelId: adults, query: { limit: 10 } })).status).toBe(404);
+    // Ordinary channels and other members are unaffected.
+    expect((await send(alice, general)).status).toBe(201);
+    expect((await send(owner, adults)).status).toBe(201);
+  });
+
+  it("applies to the server owner too, and lifts when released", async () => {
+    const adults = await adultsChannel();
+    world.server(serverId).setAgeLimit(owner, true);
+    expect(await send(owner, adults)).toMatchObject({ status: 404 });
+    world.server(serverId).setAgeLimit(owner, false);
+    expect((await send(owner, adults)).status).toBe(201);
+  });
+
+  it("does not deliver messages from age restricted channels to a limited member", async () => {
+    const adults = await adultsChannel();
+    const conn = world.connect(alice);
+    await world.frame(conn, { op: "identify" });
+    world.server(serverId).setAgeLimit(alice, true);
+    await send(owner, adults);
+    await world.settle();
+    expect(conn.types()).not.toContain("MESSAGE_CREATE");
+    await send(owner, general);
+    await world.settle();
+    expect(conn.types()).toContain("MESSAGE_CREATE");
+  });
+});

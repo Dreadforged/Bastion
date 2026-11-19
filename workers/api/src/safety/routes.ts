@@ -12,6 +12,8 @@ export interface SafetyRouteDeps {
   flags: FlagReader;
   now: () => number;
   userLimit?: RateLimit | undefined;
+  /** Called after a person's age or state changes, to update what servers show them. */
+  onAgeChange?: ((userId: string) => Promise<void>) | undefined;
 }
 
 /**
@@ -52,7 +54,12 @@ export async function handleSafety(request: Request, deps: SafetyRouteDeps): Pro
     // Only the two letter country code is read from the connection. The address is never touched.
     const header = request.headers.get("cf-ipcountry");
     const observed = header && schemas.COUNTRY_CODE.test(header) && header !== "XX" ? header : null;
-    return json(await declareAge(deps.db, deps.flags, principal.userId, change, observed, now));
+    try {
+      return json(await declareAge(deps.db, deps.flags, principal.userId, change, observed, now));
+    } finally {
+      // Also after a refusal: a younger answer can change the account state.
+      await deps.onAgeChange?.(principal.userId);
+    }
   } catch (err) {
     if (err instanceof HttpError || err instanceof AuthError) return json({ error: err.code }, err.status);
     throw err;

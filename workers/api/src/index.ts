@@ -1,10 +1,15 @@
+import { schemas } from "@bastion/shared";
 import { cleanupExpired } from "./auth/devices.js";
 import { createEmailSender } from "./auth/email.js";
 import { simpleWebAuthn } from "./auth/passkeys.js";
+import { purgeRemovedAccounts, type DeletionPorts } from "./account/delete.js";
 import { handleAccount } from "./account/routes.js";
 import { advanceAgeBands } from "./safety/account.js";
+import { syncAgeLimit } from "./safety/enforce.js";
 import { FlagReader } from "./safety/flags.js";
 import { handleSafety } from "./safety/routes.js";
+import { cloudflareAccessAuth, type StaffAuth } from "./safety/staff-auth.js";
+import { handleStaff } from "./safety/staff-routes.js";
 import { handleAuth, json } from "./auth/routes.js";
 import { handleConversations } from "./conversations/routes.js";
 import { NoopScanner } from "./files/scanner.js";
@@ -47,6 +52,45 @@ export interface Env {
   R2_ACCESS_KEY_ID?: string;
   R2_SECRET_ACCESS_KEY?: string;
   R2_BUCKET_NAME?: string;
+  /**
+   * Staff admin tool, behind Cloudflare Access. Leave unset and /staff answers 404.
+   * The team domain looks like `yourteam.cloudflareaccess.com`; the audience is the Access application's AUD tag.
+   * STAFF_EMAILS is an optional comma separated second check on top of the Access policy.
+   */
+  STAFF_ACCESS_TEAM_DOMAIN?: string;
+  STAFF_ACCESS_AUDIENCE?: string;
+  STAFF_EMAILS?: string;
+}
+
+let staffAuth: StaffAuth | undefined;
+function staffFor(env: Env): StaffAuth | undefined {
+  if (!env.STAFF_ACCESS_TEAM_DOMAIN || !env.STAFF_ACCESS_AUDIENCE) return undefined;
+  const emails = env.STAFF_EMAILS?.split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
+  staffAuth ??= cloudflareAccessAuth({
+    teamDomain: env.STAFF_ACCESS_TEAM_DOMAIN,
+    audience: env.STAFF_ACCESS_AUDIENCE,
+    allowedEmails: emails && emails.length > 0 ? emails : undefined,
+    now: Date.now,
+  });
+  return staffAuth;
+}
+
+function deletionPorts(env: Env): Omit<DeletionPorts, "db" | "now"> {
+  const server = (id: string) => env.SERVER.get(env.SERVER.idFromName(id));
+  const key = (kind: string, a: string, b: string) => `${kind}-${a.slice(-12)}${b.slice(-12)}`.slice(0, 64);
+  return {
+    serverIds: (userId) => env.USER_SESSION.get(env.USER_SESSION.idFromName(userId)).listServerIds(),
+    serverOwner: async (serverId, userId) => (await server(serverId).snapshot(userId))?.server.ownerId ?? null,
+    leaveServer: async (serverId, userId) => {
+      await server(serverId).handle(userId, { type: "member.remove", userId, body: {} }, key("leave", serverId, userId));
+    },
+    deleteServer: async (serverId, ownerId) => {
+      await server(serverId).handle(ownerId, { type: "server.delete" }, key("delete", serverId, ownerId));
+    },
+    revokeConversation: (conversationId, userId) => env.CONVERSATION.get(env.CONVERSATION.idFromName(conversationId)).revoke([userId]),
+    endSessions: (userId, sessionIds) => env.USER_SESSION.get(env.USER_SESSION.idFromName(userId)).closeSessions(sessionIds),
+    files: env.FILES,
+  };
 }
 
 function voiceDeps(env: Env): VoiceDeps | undefined {
@@ -93,10 +137,32 @@ export default {
     );
     if (auth) return auth;
 
-    const safety = await handleSafety(request, { db: env.DB, flags: flagsFor(env), now: Date.now, userLimit: env.API_RATE_LIMIT });
+    const safety = await handleSafety(request, {
+      db: env.DB,
+      flags: flagsFor(env),
+      now: Date.now,
+      userLimit: env.API_RATE_LIMIT,
+      onAgeChange: (userId) => syncAgeLimit({ db: env.DB, sessions: env.USER_SESSION, servers: env.SERVER }, userId),
+    });
     if (safety) return safety;
 
-    const account = await handleAccount(request, { db: env.DB, sessions: env.USER_SESSION, now: Date.now, userLimit: env.API_RATE_LIMIT });
+    const staff = await handleStaff(request, {
+      db: env.DB,
+      staff: staffFor(env),
+      flags: flagsFor(env),
+      now: Date.now,
+      onAccountChange: async (userId, state) => {
+        if (schemas.BLOCKED_STATES.includes(state)) {
+          const { results } = await env.DB.prepare("DELETE FROM sessions WHERE user_id = ? RETURNING id").bind(userId).all<{ id: string }>();
+          await env.USER_SESSION.get(env.USER_SESSION.idFromName(userId)).closeSessions(results.map((r) => r.id));
+        }
+        await syncAgeLimit({ db: env.DB, sessions: env.USER_SESSION, servers: env.SERVER }, userId);
+      },
+      setReportHold: (serverId, reportId, held) => env.SERVER.get(env.SERVER.idFromName(serverId)).holdReport(reportId, held),
+    });
+    if (staff) return staff;
+
+    const account = await handleAccount(request, { db: env.DB, sessions: env.USER_SESSION, now: Date.now, userLimit: env.API_RATE_LIMIT, flags: flagsFor(env), deletion: deletionPorts(env) });
     if (account) return account;
 
     const servers = await handleServers(request, {
@@ -134,6 +200,12 @@ export default {
 
     const conversations = await handleConversations(request, {
       db: env.DB,
+      flags: flagsFor(env),
+      sharesServer: async (a, b) => {
+        const ids = (u: string) => env.USER_SESSION.get(env.USER_SESSION.idFromName(u)).listServerIds();
+        const [x, y] = await Promise.all([ids(a), ids(b)]);
+        return x.some((s) => y.includes(s));
+      },
       conversations: env.CONVERSATION,
       now: Date.now,
       userLimit: env.API_RATE_LIMIT,
@@ -148,6 +220,7 @@ export default {
     await cleanupExpired(env.DB, Date.now());
     await cleanupInviteCodes(env.DB, Date.now());
     await cleanupPendingFiles(env.DB, env.FILES, Date.now());
-    await advanceAgeBands(env.DB, flagsFor(env), Date.now());
+    await purgeRemovedAccounts({ ...deletionPorts(env), db: env.DB, now: Date.now }, Date.now());
+    await advanceAgeBands(env.DB, flagsFor(env), Date.now(), (userId) => syncAgeLimit({ db: env.DB, sessions: env.USER_SESSION, servers: env.SERVER }, userId));
   },
 } satisfies ExportedHandler<Env>;

@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { World } from "../../durable/test/world.js";
 import { hashToken, newToken } from "../src/auth/crypto.js";
 import { FlagReader, setFlag } from "../src/safety/flags.js";
+import { placeHold, releaseHold } from "../src/safety/holds.js";
 import { cleanupInviteCodes, handleServers } from "../src/servers/routes.js";
 import { createTestD1 } from "./d1.js";
 
@@ -24,13 +25,17 @@ beforeEach(() => {
 /** Durable Object namespaces backed by the in-memory World. */
 const servers = {
   idFromName: (name: string) => name,
-  get: (id: string) => ({ handle: (u: string, op: unknown, key: string | null) => world.server(id).handle(u, op, key) }),
+  get: (id: string) => ({
+    handle: (u: string, op: unknown, key: string | null) => world.server(id).handle(u, op, key),
+    setAgeLimit: async (u: string, on: boolean) => world.server(id).setAgeLimit(u, on),
+  }),
 } as unknown as DurableObjectNamespace<Server>;
 
 const sessions = {
   idFromName: (name: string) => name,
   get: (userId: string) => ({
     createServer: (u: string, key: string, name: string) => world.session(u).core.createServer(u, key, name),
+    listServerIds: async () => world.session(userId).core.serverIds(),
     setStatus: (u: string, status: "online") => world.session(u).core.setStatus(u, status, []),
     fetch: async (request: Request) => {
       upgrades.push(request);
@@ -335,5 +340,97 @@ describe("gateway upgrade", () => {
     expect((await call("GET", "/gateway", { headers: upgrade("chat") })).status).toBe(400);
     expect((await call("GET", "/gateway")).status).toBe(426);
     expect(upgrades).toEqual([]);
+  });
+});
+
+describe("account state limits", () => {
+  async function setState(userId: string, state: string, band = "18plus") {
+    await db.prepare("UPDATE users SET account_state = ?, age_band = ? WHERE id = ?").bind(state, band, userId).run();
+  }
+
+  async function serverWithInvite() {
+    const owner = await signedIn();
+    await setState(owner.userId, "active");
+    const created = await call("POST", "/servers", { token: owner.token, body: { name: "Home" } });
+    const serverId = created.body.server.id as string;
+    const code = (await call("POST", `/servers/${serverId}/invites`, { token: owner.token, body: {} })).body.code as string;
+    return { owner, serverId, general: created.body.channels[0].id as string, code };
+  }
+
+  it("lets a restricted account read but refuses every write", async () => {
+    const { serverId, general, code } = await serverWithInvite();
+    const kid = await signedIn();
+    await setState(kid.userId, "restricted", "16to17");
+    expect((await call("GET", `/invites/${code}`, { token: kid.token })).status).toBe(200);
+    for (const [method, path, body] of [
+      ["POST", "/servers", { name: "mine" }],
+      ["POST", `/invites/${code}`, undefined],
+      ["POST", `/servers/${serverId}/channels/${general}/messages`, { ciphertext: "AAAAAAAAAAAAAAAA", epoch: 0 }],
+      ["PUT", "/presence", { status: "online" }],
+    ] as const) {
+      const res = await call(method, path, { token: kid.token, ...(body ? { body } : {}) });
+      expect(res, `${method} ${path}`).toMatchObject({ status: 403, body: { error: "account_restricted" } });
+    }
+  });
+
+  it("stops an account under age review from joining or creating servers", async () => {
+    const { code } = await serverWithInvite();
+    const pending = await signedIn();
+    await setState(pending.userId, "pending_age_review");
+    expect(await call("POST", `/invites/${code}`, { token: pending.token })).toMatchObject({ status: 403, body: { error: "age_review_pending" } });
+    expect(await call("POST", "/servers", { token: pending.token, body: { name: "x" } })).toMatchObject({ status: 403, body: { error: "age_review_pending" } });
+  });
+
+  it("lets an account under age review keep using servers it is already in", async () => {
+    const { serverId, general, code } = await serverWithInvite();
+    const person = await signedIn();
+    await setState(person.userId, "active");
+    expect((await call("POST", `/invites/${code}`, { token: person.token })).status).toBe(200);
+    await setState(person.userId, "pending_age_review");
+    const sent = await call("POST", `/servers/${serverId}/channels/${general}/messages`, { token: person.token, body: { ciphertext: "AAAAAAAAAAAAAAAA", epoch: 0 } });
+    expect(sent.status).toBe(201);
+  });
+
+  it("lets a restricted member leave a server", async () => {
+    const { serverId, code } = await serverWithInvite();
+    const person = await signedIn();
+    await setState(person.userId, "active");
+    await call("POST", `/invites/${code}`, { token: person.token });
+    await setState(person.userId, "restricted", "16to17");
+    expect((await call("DELETE", `/servers/${serverId}/members/@me`, { token: person.token, body: {} })).status).toBeLessThan(300);
+  });
+
+  it("hides age restricted channels from a member whose age is not confirmed adult, from the moment they join", async () => {
+    const { owner, serverId, code } = await serverWithInvite();
+    const adults = world.server(serverId).handle(owner.userId, { type: "channel.create", body: { name: "adults", ageRestricted: true } }, "adults-key-1");
+    const adultsId = ((await adults).body as { id: string }).id;
+    const unknown = await signedIn(); // age band is still "unknown"
+    expect((await call("POST", `/invites/${code}`, { token: unknown.token })).status).toBe(200);
+    const view = world.server(serverId).snapshot(unknown.userId)!;
+    expect(view.channels.map((c) => c.id)).not.toContain(adultsId);
+    const read = await call("GET", `/servers/${serverId}/channels/${adultsId}/messages`, { token: unknown.token });
+    expect(read.status).toBe(404);
+  });
+
+  it("shows age restricted channels to a confirmed adult", async () => {
+    const { owner, serverId, code } = await serverWithInvite();
+    const made = await world.server(serverId).handle(owner.userId, { type: "channel.create", body: { name: "adults", ageRestricted: true } }, "adults-key-2");
+    const adult = await signedIn();
+    await setState(adult.userId, "active", "18plus");
+    await call("POST", `/invites/${code}`, { token: adult.token });
+    expect(world.server(serverId).snapshot(adult.userId)!.channels.map((c) => c.id)).toContain((made.body as { id: string }).id);
+  });
+});
+
+describe("server deletion and legal holds", () => {
+  it("refuses to delete a held server until the hold is released", async () => {
+    const owner = await signedIn();
+    await db.prepare("UPDATE users SET account_state = 'active', age_band = '18plus' WHERE id = ?").bind(owner.userId).run();
+    const created = await call("POST", "/servers", { token: owner.token, body: { name: "Held" } });
+    const serverId = created.body.server.id as string;
+    const holdId = await placeHold(db, "staff-1", "server", serverId, "child_safety", null, world.now);
+    expect(await call("DELETE", `/servers/${serverId}`, { token: owner.token })).toMatchObject({ status: 409, body: { error: "legal_hold" } });
+    await releaseHold(db, "staff-1", holdId, world.now);
+    expect((await call("DELETE", `/servers/${serverId}`, { token: owner.token })).status).toBeLessThan(300);
   });
 });

@@ -211,4 +211,8 @@ export const SERVER_MIGRATIONS: readonly string[] = [
   ALTER TABLE audit_log ADD COLUMN reason_code TEXT;
   ALTER TABLE reports ADD COLUMN legal_hold INTEGER NOT NULL DEFAULT 0;
   `,
+  `
+  -- Users the platform has limited by age. They cannot see age restricted channels.
+  CREATE TABLE member_age_limits (user_id TEXT PRIMARY KEY);
+  `,
 ];

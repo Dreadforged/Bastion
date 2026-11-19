@@ -7,6 +7,8 @@ export interface Principal {
   userId: string;
   deviceId: string;
   sessionId: string;
+  accountState: schemas.AccountState;
+  ageBand: schemas.AgeBand;
 }
 
 interface Issued {
@@ -55,15 +57,15 @@ export async function authenticate(db: D1Database, request: Request, now: number
   if (!match) throw new AuthError(401, "unauthorized");
   const row = await db
     .prepare(
-      `SELECT s.id, s.user_id, s.device_id, u.account_state FROM sessions s JOIN users u ON u.id = s.user_id
+      `SELECT s.id, s.user_id, s.device_id, u.account_state, u.age_band FROM sessions s JOIN users u ON u.id = s.user_id
        WHERE s.access_hash = ? AND s.access_expires_at > ?`,
     )
     .bind(await hashToken(match[1]!), now)
-    .first<{ id: string; user_id: string; device_id: string; account_state: schemas.AccountState }>();
+    .first<{ id: string; user_id: string; device_id: string; account_state: schemas.AccountState; age_band: schemas.AgeBand }>();
   if (!row) throw new AuthError(401, "unauthorized");
   // Suspended and removed accounts cannot use the API, even with a token issued earlier.
   if (schemas.BLOCKED_STATES.includes(row.account_state)) throw new AuthError(403, "account_blocked");
-  return { userId: row.user_id, deviceId: row.device_id, sessionId: row.id };
+  return { userId: row.user_id, deviceId: row.device_id, sessionId: row.id, accountState: row.account_state, ageBand: row.age_band };
 }
 
 /**

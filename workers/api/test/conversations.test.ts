@@ -7,15 +7,18 @@ import { migrate } from "../../durable/src/storage.js";
 import { createTestStorage } from "../../durable/test/world.js";
 import { hashToken, newToken } from "../src/auth/crypto.js";
 import { handleConversations } from "../src/conversations/routes.js";
+import { FlagReader } from "../src/safety/flags.js";
 import { createTestD1 } from "./d1.js";
 
 let db: D1Database;
 let objects: Map<string, ConversationCore>;
+let sharedServer = false;
 const now = 1_700_000_000_000;
 
 beforeEach(() => {
   db = createTestD1();
   objects = new Map();
+  sharedServer = false;
 });
 
 function object(id: string): ConversationCore {
@@ -34,6 +37,7 @@ const conversations = {
   get: (id: string) => ({
     init: (init: Parameters<ConversationCore["init"]>[0]) => object(id).init(init),
     handle: (actor: { userId: string; deviceId: string }, op: unknown, key: string | null) => object(id).handle(actor, op, key),
+    revoke: (userIds: string[]) => object(id).revoke(userIds),
   }),
 } as unknown as DurableObjectNamespace<Conversation>;
 
@@ -78,7 +82,7 @@ async function call(method: string, path: string, as: Session | null, body?: unk
     headers,
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
-  const res = await handleConversations(request, { db, conversations, now: () => now });
+  const res = await handleConversations(request, { db, conversations, now: () => now, sharesServer: async () => sharedServer });
   if (!res) throw new Error(`unrouted ${method} ${path}`);
   const text = await res.text();
   return { status: res.status, body: text ? JSON.parse(text) : null };
@@ -203,5 +207,149 @@ describe("conversations", () => {
     });
     expect(r.status).toBe(400);
     expect((await call("GET", "/conversations/not-an-id/envelopes", alice)).status).toBe(404);
+  });
+});
+
+describe("account state limits", () => {
+  const setState = (userId: string, state: string) => db.prepare("UPDATE users SET account_state = ? WHERE id = ?").bind(state, userId).run();
+
+  it("keeps a restricted account to reading", async () => {
+    const alice = await signedIn();
+    const bob = await signedIn();
+    await upload(bob, 1);
+    const made = await call("POST", "/conversations", alice, { kind: "dm", userId: bob.userId });
+    expect(made.status).toBeLessThan(300);
+    await setState(alice.userId, "restricted");
+
+    expect((await call("GET", "/conversations", alice)).status).toBe(200);
+    expect((await call("GET", `/conversations/${made.body.id}`, alice)).status).toBe(200);
+    for (const [path, body] of [
+      ["/conversations", { kind: "dm", userId: bob.userId }],
+      ["/keys/packages/claim", { userIds: [bob.userId] }],
+      [`/conversations/${made.body.id}/messages`, { envelope: "AAAA" }],
+    ] as const) {
+      expect(await call("POST", path, alice, body), path).toMatchObject({ status: 403, body: { error: "account_restricted" } });
+    }
+  });
+
+  it("stops an account under age review from starting new DMs or claiming keys, but not from reading", async () => {
+    const alice = await signedIn();
+    const bob = await signedIn();
+    await upload(bob, 1);
+    await setState(alice.userId, "pending_age_review");
+    expect(await call("POST", "/conversations", alice, { kind: "dm", userId: bob.userId })).toMatchObject({ status: 403, body: { error: "age_review_pending" } });
+    expect(await call("POST", "/keys/packages/claim", alice, { userIds: [bob.userId] })).toMatchObject({ status: 403, body: { error: "age_review_pending" } });
+    expect((await call("GET", "/conversations", alice)).status).toBe(200);
+  });
+
+  it("lets an account under age review answer a DM that already exists", async () => {
+    const alice = await signedIn();
+    const bob = await signedIn();
+    await upload(bob, 1);
+    const made = await call("POST", "/conversations", alice, { kind: "dm", userId: bob.userId });
+    await setState(bob.userId, "pending_age_review");
+    // Bob can still open and read it; the object, not the account check, decides about sends.
+    expect((await call("GET", `/conversations/${made.body.id}`, bob)).status).toBe(200);
+  });
+});
+
+describe("message requests and teen defaults", () => {
+  const setPolicy = (userId: string, policy: string) =>
+    db.prepare("INSERT INTO privacy_settings (user_id, dm_policy, updated_at) VALUES (?, ?, ?) ON CONFLICT (user_id) DO UPDATE SET dm_policy = ?2").bind(userId, policy, now).run();
+  const setBand = (userId: string, band: string) => db.prepare("UPDATE users SET age_band = ?, account_state = 'active' WHERE id = ?").bind(band, userId).run();
+  const status = async (a: Session, b: Session) =>
+    await db.prepare("SELECT status, requested_by FROM dm_pairs WHERE user_a = ? AND user_b = ?").bind(...[a.userId, b.userId].sort()).first<{ status: string; requested_by: string | null }>();
+  const device = (s: Session) => ({ userId: s.userId, deviceId: s.deviceId });
+
+  async function stranger() {
+    const [alice, bob] = [await signedIn(), await signedIn()];
+    await setPolicy(bob.userId, "requests");
+    const made = await call("POST", "/conversations", alice, { kind: "dm", userId: bob.userId });
+    expect(made.status).toBe(201);
+    await call("POST", `/conversations/${made.body.id}/commits`, alice, { epoch: 0, commit: blob("c"), welcome: blob("w"), adds: [device(bob)] });
+    return { alice, bob, id: made.body.id as string };
+  }
+  const send = (s: Session, id: string) => call("POST", `/conversations/${id}/messages`, s, { epoch: 1, ciphertext: blob("hi") });
+
+  it("starts a DM from a stranger as a request, and hides it from the recipient until accepted", async () => {
+    const { alice, bob, id } = await stranger();
+    expect(await status(alice, bob)).toEqual({ status: "request", requested_by: alice.userId });
+    expect((await call("GET", "/conversations", bob)).body.ids).not.toContain(id);
+    expect((await call("GET", "/conversations", alice)).body.ids).toContain(id);
+    expect((await call("GET", "/conversations/requests", bob)).body).toEqual([{ conversationId: id, from: alice.userId }]);
+    expect((await call("GET", "/conversations/requests", alice)).body).toEqual([]);
+  });
+
+  it("lets people who share a server DM straight away", async () => {
+    const [alice, bob] = [await signedIn(), await signedIn()];
+    await setPolicy(bob.userId, "requests");
+    sharedServer = true;
+    expect((await call("POST", "/conversations", alice, { kind: "dm", userId: bob.userId })).status).toBe(201);
+    expect(await status(alice, bob)).toEqual({ status: "active", requested_by: null });
+  });
+
+  it("limits the requester to one message until the recipient accepts", async () => {
+    const { alice, bob, id } = await stranger();
+    expect((await send(alice, id)).status).toBe(201);
+    expect(await send(alice, id)).toMatchObject({ status: 403, body: { error: "message_request_pending" } });
+    expect((await call("POST", `/conversations/${id}/accept`, alice)).status).toBe(404); // not theirs to accept
+    expect((await call("POST", `/conversations/${id}/accept`, bob)).status).toBe(204);
+    expect((await call("GET", "/conversations", bob)).body.ids).toContain(id);
+    expect((await send(alice, id)).status).toBe(201);
+  });
+
+  it("treats a reply from the recipient as accepting", async () => {
+    const { alice, bob, id } = await stranger();
+    expect((await send(bob, id)).status).toBe(201);
+    expect((await status(alice, bob))!.status).toBe("active");
+  });
+
+  it("does not let a request start a call until accepted", async () => {
+    const { alice, id } = await stranger();
+    const res = await call("POST", `/conversations/${id}/call`, alice, { groupConversationId: newId() });
+    expect(res).toMatchObject({ status: 403, body: { error: "message_request_pending" } });
+  });
+
+  it("declining ends the request for good: no sends, no new request, recipient removed", async () => {
+    const { alice, bob, id } = await stranger();
+    expect((await call("POST", `/conversations/${id}/decline`, bob)).status).toBe(204);
+    expect(await send(alice, id)).toMatchObject({ status: 403, body: { error: "message_request_declined" } });
+    expect((await call("GET", `/conversations/${id}`, bob)).status).not.toBe(200);
+    expect(await call("POST", "/conversations", alice, { kind: "dm", userId: bob.userId })).toMatchObject({ status: 403, body: { error: "cannot_message_user" } });
+    expect((await call("POST", "/conversations", bob, { kind: "dm", userId: alice.userId })).status).toBe(403);
+  });
+
+  it("applies teen defaults: a 13 to 17 year old with no choice made gets message requests", async () => {
+    const [alice, teen] = [await signedIn(), await signedIn()];
+    await setBand(teen.userId, "16to17");
+    expect((await call("POST", "/conversations", alice, { kind: "dm", userId: teen.userId })).status).toBe(201);
+    expect((await status(alice, teen))!.status).toBe("request");
+  });
+
+  it("keeps a teen's own choice of nobody", async () => {
+    const [alice, teen] = [await signedIn(), await signedIn()];
+    await setBand(teen.userId, "13to15");
+    await setPolicy(teen.userId, "nobody");
+    expect(await call("POST", "/conversations", alice, { kind: "dm", userId: teen.userId })).toMatchObject({ status: 403, body: { error: "cannot_message_user" } });
+  });
+
+  it("leaves adults on their own choice", async () => {
+    const [alice, adult] = [await signedIn(), await signedIn()];
+    await setBand(adult.userId, "18plus");
+    expect((await call("POST", "/conversations", alice, { kind: "dm", userId: adult.userId })).status).toBe(201);
+    expect((await status(alice, adult))!.status).toBe("active");
+  });
+
+  it("refuses stranger requests when the region turns message requests off", async () => {
+    const [alice, bob] = [await signedIn(), await signedIn()];
+    await setPolicy(bob.userId, "requests");
+    await db.prepare("INSERT INTO safety_flags (module, region, enabled, config, updated_by, updated_at) VALUES ('contact', 'default', 1, '{\"messageRequests\":false}', 's', ?)").bind(now).run();
+    const request = new Request("https://api.test/conversations", {
+      method: "POST",
+      headers: { authorization: `Bearer ${alice.token}`, "idempotency-key": "k-flag-0001" },
+      body: JSON.stringify({ kind: "dm", userId: bob.userId }),
+    });
+    const res = await handleConversations(request, { db, conversations, now: () => now, flags: new FlagReader(db, () => now) });
+    expect(res!.status).toBe(403);
   });
 });

@@ -17,6 +17,8 @@ export const LIMITS = {
   fileUpload: { max: 30, windowMs: 10 * 60_000 },
   /** Account data exports per user. */
   accountExport: { max: 3, windowMs: 60 * 60_000 },
+  /** Account deletion attempts per user. */
+  accountDelete: { max: 5, windowMs: 60 * 60_000 },
   /** Age declarations per user, so an answer cannot be fished for by retrying. */
   ageDeclare: { max: 5, windowMs: 60 * 60_000 },
 } satisfies Record<string, Limit>;
