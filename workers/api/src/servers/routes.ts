@@ -14,6 +14,8 @@ export interface ServerRouteDeps {
   now: () => number;
   /** Per-user request limit, keyed by user id. Optional in local dev. */
   userLimit?: RateLimit | undefined;
+  /** Cut a user off from an encrypted conversation. Optional in tests. */
+  revokeConversationAccess?: ((conversationId: string, userId: string) => Promise<void>) | undefined;
 }
 
 function inviteCode(value: string | undefined): string {
@@ -132,6 +134,23 @@ async function applyEffects(deps: ServerRouteDeps, serverId: string, r: Reply): 
   if (r.effects?.serverDeleted) await deps.db.prepare("DELETE FROM invite_codes WHERE server_id = ?").bind(serverId).run();
 }
 
+/**
+ * A kicked, banned or departed member loses the server's encrypted channels
+ * at once, rather than at the channel's next access check.
+ */
+async function revokeChannels(deps: ServerRouteDeps, serverId: string, userId: string): Promise<void> {
+  if (!deps.revokeConversationAccess) return;
+  const { results } = await deps.db
+    .prepare(
+      `SELECT cc.conversation_id FROM channel_conversations cc
+       JOIN conversation_members cm ON cm.conversation_id = cc.conversation_id
+       WHERE cc.server_id = ? AND cm.user_id = ?`,
+    )
+    .bind(serverId, userId)
+    .all<{ conversation_id: string }>();
+  await Promise.allSettled(results.map((r) => deps.revokeConversationAccess!(r.conversation_id, userId)));
+}
+
 async function inviteServer(deps: ServerRouteDeps, code: string): Promise<string> {
   const row = await deps.db
     .prepare("SELECT server_id FROM invite_codes WHERE code = ? AND (expires_at IS NULL OR expires_at > ?)")
@@ -223,6 +242,7 @@ export async function handleServers(request: Request, deps: ServerRouteDeps): Pr
         if (op) {
           const r = await handle(serverId, op);
           await applyEffects(deps, serverId, r);
+          if ((op.type === "member.remove" || op.type === "ban.put") && r.status < 300) await revokeChannels(deps, serverId, op.userId);
           return reply(r);
         }
       }

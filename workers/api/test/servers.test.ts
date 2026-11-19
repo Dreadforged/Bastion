@@ -10,12 +10,14 @@ let db: D1Database;
 let world: World;
 let limited: boolean;
 let upgrades: Request[];
+let revoked: { conversationId: string; userId: string }[];
 
 beforeEach(() => {
   db = createTestD1();
   world = new World();
   limited = false;
   upgrades = [];
+  revoked = [];
 });
 
 /** Durable Object namespaces backed by the in-memory World. */
@@ -71,7 +73,10 @@ async function call(method: string, path: string, opts: { token?: string; body?:
     headers,
     ...(opts.body === undefined ? {} : { body: typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body) }),
   });
-  const res = await handleServers(request, { db, servers, sessions, now: () => world.now, userLimit });
+  const revokeConversationAccess = async (conversationId: string, userId: string) => {
+    revoked.push({ conversationId, userId });
+  };
+  const res = await handleServers(request, { db, servers, sessions, now: () => world.now, userLimit, revokeConversationAccess });
   if (!res) throw new Error(`unrouted ${method} ${path}`);
   const text = await res.text();
   return { status: res.status, body: text ? JSON.parse(text) : null, headers: res.headers };
@@ -214,6 +219,25 @@ describe("moderation routes", () => {
     expect((await call("DELETE", path, { token: owner.token, body: { reason: "bye" } })).status).toBe(204);
     const log = await call("GET", `/servers/${serverId}/audit-log?action=member.kick`, { token: owner.token });
     expect(log.body).toEqual([expect.objectContaining({ action: "member.kick", targetId: member.userId, reason: "bye" })]);
+  });
+
+  it("cuts kicked and banned members off the server's encrypted channels", async () => {
+    const { owner, member, serverId, general } = await setup();
+    const [inChannel, otherServer] = ["AAAAAAAAAAAAAAAAAAAAAA", "BBBBBBBBBBBBBBBBBBBBBB"];
+    await db.prepare("INSERT INTO channel_conversations VALUES (?, ?, ?)").bind(general, serverId, inChannel).run();
+    await db.prepare("INSERT INTO channel_conversations VALUES (?, ?, ?)").bind(newId(), newId(), otherServer).run();
+    for (const cid of [inChannel, otherServer]) {
+      await db.prepare("INSERT INTO conversation_members VALUES (?, ?)").bind(cid, member.userId).run();
+    }
+
+    // A failed kick revokes nothing.
+    await call("DELETE", `/servers/${serverId}/members/${owner.userId}`, { token: member.token });
+    expect(revoked).toEqual([]);
+
+    await call("DELETE", `/servers/${serverId}/members/${member.userId}`, { token: owner.token });
+    expect(revoked).toEqual([{ conversationId: inChannel, userId: member.userId }]);
+    await call("PUT", `/servers/${serverId}/bans/${member.userId}`, { token: owner.token, body: {} });
+    expect(revoked).toHaveLength(2);
   });
 
   it("bans, lists bans and unbans", async () => {

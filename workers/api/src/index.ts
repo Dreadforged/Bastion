@@ -30,6 +30,7 @@ export interface Env {
 export default {
   async fetch(request, env): Promise<Response> {
     const url = new URL(request.url);
+    const conversation = (id: string) => env.CONVERSATION.get(env.CONVERSATION.idFromName(id));
 
     if (url.pathname === "/health") {
       return json({ ok: true, environment: env.ENVIRONMENT });
@@ -44,6 +45,7 @@ export default {
         appOrigin: env.APP_ORIGIN,
         now: Date.now,
         endSessions: (userId, sessionIds) => env.USER_SESSION.get(env.USER_SESSION.idFromName(userId)).closeSessions(sessionIds),
+        revokeConversationDevice: (conversationId, deviceId) => conversation(conversationId).revokeDevices([deviceId]),
       },
       env.AUTH_RATE_LIMIT,
     );
@@ -55,6 +57,7 @@ export default {
       sessions: env.USER_SESSION,
       now: Date.now,
       userLimit: env.API_RATE_LIMIT,
+      revokeConversationAccess: (conversationId, userId) => conversation(conversationId).revoke([userId]),
     });
     if (servers) return servers;
 

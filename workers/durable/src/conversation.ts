@@ -44,4 +44,8 @@ export class Conversation extends DurableObject<DurableEnv> {
   async revoke(userIds: string[]): Promise<void> {
     await this.core.revoke(userIds);
   }
+
+  async revokeDevices(deviceIds: string[]): Promise<void> {
+    await this.core.revokeDevices(deviceIds);
+  }
 }
