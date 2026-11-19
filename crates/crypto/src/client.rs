@@ -22,8 +22,7 @@ use openmls_rust_crypto::OpenMlsRustCrypto;
 use crate::{padding, CryptoError};
 
 /// X25519, AES-128-GCM, SHA-256, Ed25519.
-pub const CIPHERSUITE: Ciphersuite =
-    Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
+pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 
 /// Result of a commit the client created: the commit for the group and, when
 /// members were added, the welcome for the new members.
@@ -60,14 +59,18 @@ impl Client {
     /// stable id other members see, e.g. `user_id/device_id`.
     pub fn new(identity: &[u8]) -> Result<Self, CryptoError> {
         let provider = OpenMlsRustCrypto::default();
-        let signer =
-            SignatureKeyPair::new(CIPHERSUITE.signature_algorithm()).map_err(mls_err)?;
+        let signer = SignatureKeyPair::new(CIPHERSUITE.signature_algorithm()).map_err(mls_err)?;
         signer.store(provider.storage()).map_err(mls_err)?;
         let credential = CredentialWithKey {
             credential: BasicCredential::new(identity.to_vec()).into(),
             signature_key: signer.to_public_vec().into(),
         };
-        Ok(Self { provider, signer, credential, groups: HashMap::new() })
+        Ok(Self {
+            provider,
+            signer,
+            credential,
+            groups: HashMap::new(),
+        })
     }
 
     /// Public identity key, used for safety codes.
@@ -78,9 +81,17 @@ impl Client {
     /// Creates a single-use key package to upload to the server.
     pub fn key_package(&self) -> Result<Vec<u8>, CryptoError> {
         let bundle = KeyPackage::builder()
-            .build(CIPHERSUITE, &self.provider, &self.signer, self.credential.clone())
+            .build(
+                CIPHERSUITE,
+                &self.provider,
+                &self.signer,
+                self.credential.clone(),
+            )
             .map_err(mls_err)?;
-        bundle.key_package().tls_serialize_detached().map_err(mls_err)
+        bundle
+            .key_package()
+            .tls_serialize_detached()
+            .map_err(mls_err)
     }
 
     fn create_config() -> MlsGroupCreateConfig {
@@ -91,7 +102,9 @@ impl Client {
     }
 
     fn group(&mut self, group_id: &[u8]) -> Result<&mut MlsGroup, CryptoError> {
-        self.groups.get_mut(group_id).ok_or(CryptoError::UnknownGroup)
+        self.groups
+            .get_mut(group_id)
+            .ok_or(CryptoError::UnknownGroup)
     }
 
     /// Starts a new group with this device as the only member. The id should
@@ -126,9 +139,11 @@ impl Client {
         }
         let provider = &self.provider;
         let signer = &self.signer;
-        let group = self.groups.get_mut(group_id).ok_or(CryptoError::UnknownGroup)?;
-        let (commit, welcome, _) =
-            group.add_members(provider, signer, &kps).map_err(mls_err)?;
+        let group = self
+            .groups
+            .get_mut(group_id)
+            .ok_or(CryptoError::UnknownGroup)?;
+        let (commit, welcome, _) = group.add_members(provider, signer, &kps).map_err(mls_err)?;
         Ok(CommitOut {
             commit: commit.to_bytes().map_err(mls_err)?,
             welcome: Some(welcome.to_bytes().map_err(mls_err)?),
@@ -145,17 +160,25 @@ impl Client {
     ) -> Result<CommitOut, CryptoError> {
         let provider = &self.provider;
         let signer = &self.signer;
-        let group = self.groups.get_mut(group_id).ok_or(CryptoError::UnknownGroup)?;
+        let group = self
+            .groups
+            .get_mut(group_id)
+            .ok_or(CryptoError::UnknownGroup)?;
         let indices: Vec<LeafNodeIndex> = group
             .members()
-            .filter(|m| identities.iter().any(|id| id == m.credential.serialized_content()))
+            .filter(|m| {
+                identities
+                    .iter()
+                    .any(|id| id == m.credential.serialized_content())
+            })
             .map(|m| m.index)
             .collect();
         if indices.len() != identities.len() {
             return Err(CryptoError::NotAMember);
         }
-        let (commit, welcome, _) =
-            group.remove_members(provider, signer, &indices).map_err(mls_err)?;
+        let (commit, welcome, _) = group
+            .remove_members(provider, signer, &indices)
+            .map_err(mls_err)?;
         Ok(CommitOut {
             commit: commit.to_bytes().map_err(mls_err)?,
             welcome: welcome.map(|w| w.to_bytes()).transpose().map_err(mls_err)?,
@@ -166,17 +189,26 @@ impl Client {
     pub fn update_keys(&mut self, group_id: &[u8]) -> Result<CommitOut, CryptoError> {
         let provider = &self.provider;
         let signer = &self.signer;
-        let group = self.groups.get_mut(group_id).ok_or(CryptoError::UnknownGroup)?;
+        let group = self
+            .groups
+            .get_mut(group_id)
+            .ok_or(CryptoError::UnknownGroup)?;
         let bundle = group
             .self_update(provider, signer, Default::default())
             .map_err(mls_err)?;
-        Ok(CommitOut { commit: bundle.commit().to_bytes().map_err(mls_err)?, welcome: None })
+        Ok(CommitOut {
+            commit: bundle.commit().to_bytes().map_err(mls_err)?,
+            welcome: None,
+        })
     }
 
     /// Applies this device's pending commit after the server accepted it.
     pub fn commit_accepted(&mut self, group_id: &[u8]) -> Result<(), CryptoError> {
         let provider = &self.provider;
-        let group = self.groups.get_mut(group_id).ok_or(CryptoError::UnknownGroup)?;
+        let group = self
+            .groups
+            .get_mut(group_id)
+            .ok_or(CryptoError::UnknownGroup)?;
         group.merge_pending_commit(provider).map_err(mls_err)
     }
 
@@ -184,8 +216,13 @@ impl Client {
     /// (usually because another member's commit got in first).
     pub fn commit_rejected(&mut self, group_id: &[u8]) -> Result<(), CryptoError> {
         let provider = &self.provider;
-        let group = self.groups.get_mut(group_id).ok_or(CryptoError::UnknownGroup)?;
-        group.clear_pending_commit(provider.storage()).map_err(mls_err)
+        let group = self
+            .groups
+            .get_mut(group_id)
+            .ok_or(CryptoError::UnknownGroup)?;
+        group
+            .clear_pending_commit(provider.storage())
+            .map_err(mls_err)
     }
 
     /// Joins a group from a welcome. Returns the group id.
@@ -215,8 +252,13 @@ impl Client {
         let padded = padding::pad(content)?;
         let provider = &self.provider;
         let signer = &self.signer;
-        let group = self.groups.get_mut(group_id).ok_or(CryptoError::UnknownGroup)?;
-        let msg = group.create_message(provider, signer, &padded).map_err(mls_err)?;
+        let group = self
+            .groups
+            .get_mut(group_id)
+            .ok_or(CryptoError::UnknownGroup)?;
+        let msg = group
+            .create_message(provider, signer, &padded)
+            .map_err(mls_err)?;
         msg.to_bytes().map_err(mls_err)
     }
 
@@ -227,7 +269,10 @@ impl Client {
             .try_into_protocol_message()
             .map_err(|_| CryptoError::Malformed)?;
         let provider = &self.provider;
-        let group = self.groups.get_mut(group_id).ok_or(CryptoError::UnknownGroup)?;
+        let group = self
+            .groups
+            .get_mut(group_id)
+            .ok_or(CryptoError::UnknownGroup)?;
         let processed = group.process_message(provider, msg).map_err(mls_err)?;
         let sender = processed.credential().serialized_content().to_vec();
         match processed.into_content() {
@@ -237,12 +282,16 @@ impl Client {
             }
             ProcessedMessageContent::StagedCommitMessage(staged) => {
                 let removed = staged.self_removed();
-                group.merge_staged_commit(provider, *staged).map_err(mls_err)?;
+                group
+                    .merge_staged_commit(provider, *staged)
+                    .map_err(mls_err)?;
                 if removed {
                     self.groups.remove(group_id);
                     return Ok(Incoming::Removed);
                 }
-                Ok(Incoming::Commit { epoch: group.epoch().as_u64() })
+                Ok(Incoming::Commit {
+                    epoch: group.epoch().as_u64(),
+                })
             }
             // Standalone proposals aren't used: every change is a commit.
             _ => Err(CryptoError::Malformed),

@@ -57,7 +57,9 @@ mod tests {
         let b = safety_code(b"bob", &[2; 32], b"alice", &[1; 32]);
         assert_eq!(a, b);
         assert_eq!(a.len(), 60 + 11);
-        assert!(a.split(' ').all(|g| g.len() == 5 && g.bytes().all(|c| c.is_ascii_digit())));
+        assert!(a
+            .split(' ')
+            .all(|g| g.len() == 5 && g.bytes().all(|c| c.is_ascii_digit())));
     }
 
     #[test]

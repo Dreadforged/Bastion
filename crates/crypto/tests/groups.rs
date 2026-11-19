@@ -6,13 +6,22 @@ use bastion_crypto::{safety_code, Client, Incoming};
 const GROUP: &[u8] = b"0123456789abcdef";
 
 fn msg(sender: &str, content: &str) -> Incoming {
-    Incoming::Message { sender: sender.into(), content: content.into() }
+    Incoming::Message {
+        sender: sender.into(),
+        content: content.into(),
+    }
 }
 
 /// Alice creates a group and adds everyone else in one commit.
 fn group_of(names: &[&str]) -> Vec<Client> {
-    let mut clients: Vec<Client> = names.iter().map(|n| Client::new(n.as_bytes()).unwrap()).collect();
-    let kps: Vec<Vec<u8>> = clients[1..].iter().map(|c| c.key_package().unwrap()).collect();
+    let mut clients: Vec<Client> = names
+        .iter()
+        .map(|n| Client::new(n.as_bytes()).unwrap())
+        .collect();
+    let kps: Vec<Vec<u8>> = clients[1..]
+        .iter()
+        .map(|c| c.key_package().unwrap())
+        .collect();
     clients[0].create_group(GROUP).unwrap();
     let out = clients[0].add_members(GROUP, &kps).unwrap();
     clients[0].commit_accepted(GROUP).unwrap();
@@ -57,11 +66,20 @@ fn removal_rotates_keys() {
 
     let out = c[0].remove_members(GROUP, &[b"carol".to_vec()]).unwrap();
     c[0].commit_accepted(GROUP).unwrap();
-    assert_eq!(c[1].receive(GROUP, &out.commit).unwrap(), Incoming::Commit { epoch: epoch + 1 });
-    assert_eq!(c[0].members(GROUP).unwrap(), vec![b"alice".to_vec(), b"bob".to_vec()]);
+    assert_eq!(
+        c[1].receive(GROUP, &out.commit).unwrap(),
+        Incoming::Commit { epoch: epoch + 1 }
+    );
+    assert_eq!(
+        c[0].members(GROUP).unwrap(),
+        vec![b"alice".to_vec(), b"bob".to_vec()]
+    );
 
     let ct = c[0].encrypt(GROUP, b"carol is gone").unwrap();
-    assert_eq!(c[1].receive(GROUP, &ct).unwrap(), msg("alice", "carol is gone"));
+    assert_eq!(
+        c[1].receive(GROUP, &ct).unwrap(),
+        msg("alice", "carol is gone")
+    );
     // Carol still holds the old epoch's keys, which don't open the new epoch.
     assert!(c[2].receive(GROUP, &ct).is_err());
 
@@ -74,9 +92,15 @@ fn self_update_advances_epoch() {
     let mut c = group_of(&["alice", "bob"]);
     let out = c[1].update_keys(GROUP).unwrap();
     c[1].commit_accepted(GROUP).unwrap();
-    assert!(matches!(c[0].receive(GROUP, &out.commit).unwrap(), Incoming::Commit { .. }));
+    assert!(matches!(
+        c[0].receive(GROUP, &out.commit).unwrap(),
+        Incoming::Commit { .. }
+    ));
     let ct = c[0].encrypt(GROUP, b"still here").unwrap();
-    assert_eq!(c[1].receive(GROUP, &ct).unwrap(), msg("alice", "still here"));
+    assert_eq!(
+        c[1].receive(GROUP, &ct).unwrap(),
+        msg("alice", "still here")
+    );
 }
 
 #[test]
@@ -102,14 +126,19 @@ fn late_joiner_cannot_read_earlier_messages() {
     c[1].receive(GROUP, &before).unwrap();
 
     let mut dave = Client::new(b"dave").unwrap();
-    let out = c[0].add_members(GROUP, &[dave.key_package().unwrap()]).unwrap();
+    let out = c[0]
+        .add_members(GROUP, &[dave.key_package().unwrap()])
+        .unwrap();
     c[0].commit_accepted(GROUP).unwrap();
     c[1].receive(GROUP, &out.commit).unwrap();
     dave.join(&out.welcome.unwrap()).unwrap();
 
     assert!(dave.receive(GROUP, &before).is_err());
     let after = c[0].encrypt(GROUP, b"hi dave").unwrap();
-    assert_eq!(dave.receive(GROUP, &after).unwrap(), msg("alice", "hi dave"));
+    assert_eq!(
+        dave.receive(GROUP, &after).unwrap(),
+        msg("alice", "hi dave")
+    );
 }
 
 #[test]
