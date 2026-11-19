@@ -3,6 +3,8 @@ import { cleanupExpired } from "./auth/devices.js";
 import { createEmailSender } from "./auth/email.js";
 import { simpleWebAuthn } from "./auth/passkeys.js";
 import { handleAuth, json } from "./auth/routes.js";
+import { cleanupInviteCodes, handleServers } from "./servers/routes.js";
+import type { Server, UserSession } from "@bastion/durable";
 
 // Durable Object classes must be exported from the Worker entry.
 export { Conversation, Server, UserSession } from "@bastion/durable";
@@ -11,8 +13,8 @@ export interface Env {
   ENVIRONMENT: string;
   DB: D1Database;
   FILES: R2Bucket;
-  USER_SESSION: DurableObjectNamespace;
-  SERVER: DurableObjectNamespace;
+  USER_SESSION: DurableObjectNamespace<UserSession>;
+  SERVER: DurableObjectNamespace<Server>;
   CONVERSATION: DurableObjectNamespace;
   /** WebAuthn relying party id, e.g. the app domain. */
   RP_ID: string;
@@ -21,6 +23,8 @@ export interface Env {
   APP_ORIGIN: string;
   /** Per-IP limit for unauthenticated auth endpoints. Optional in local dev. */
   AUTH_RATE_LIMIT?: RateLimit;
+  /** Per-user limit for server, message and invite routes. Optional in local dev. */
+  API_RATE_LIMIT?: RateLimit;
 }
 
 export default {
@@ -44,6 +48,15 @@ export default {
     );
     if (auth) return auth;
 
+    const servers = await handleServers(request, {
+      db: env.DB,
+      servers: env.SERVER,
+      sessions: env.USER_SESSION,
+      now: Date.now,
+      userLimit: env.API_RATE_LIMIT,
+    });
+    if (servers) return servers;
+
     // GET /conversations/:id/socket upgrades into the Conversation object.
     const match = url.pathname.match(/^\/conversations\/([^/]+)\/socket$/);
     if (match) {
@@ -59,5 +72,6 @@ export default {
 
   async scheduled(_controller, env): Promise<void> {
     await cleanupExpired(env.DB, Date.now());
+    await cleanupInviteCodes(env.DB, Date.now());
   },
 } satisfies ExportedHandler<Env>;
