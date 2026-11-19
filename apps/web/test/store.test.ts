@@ -120,3 +120,30 @@ describe("store", () => {
     expect(s.conversationSeq["c".repeat(22)]).toBe(5);
   });
 });
+
+describe("CALL_UPDATE", () => {
+  const call = {
+    id: "d".repeat(32),
+    conversationId: "D".repeat(22),
+    callerId: "0".repeat(24) + "A1",
+    calleeId: "0".repeat(24) + "B1",
+    groupConversationId: "G".repeat(22),
+    state: "ringing" as const,
+    endReason: null,
+    ringExpiresAt: 2,
+    createdAt: 1,
+  };
+
+  it("tracks a live call by DM and drops it when it ends", () => {
+    let s = applyEvent(emptyState, "CALL_UPDATE", call);
+    expect(s.calls[call.conversationId]?.state).toBe("ringing");
+    s = applyEvent(s, "CALL_UPDATE", { ...call, state: "active" });
+    expect(s.calls[call.conversationId]?.state).toBe("active");
+    s = applyEvent(s, "CALL_UPDATE", { ...call, state: "ended", endReason: "declined" });
+    expect(s.calls).toEqual({});
+  });
+
+  it("ignores a malformed event", () => {
+    expect(applyEvent(emptyState, "CALL_UPDATE", { ...call, id: "nope" })).toBe(emptyState);
+  });
+});

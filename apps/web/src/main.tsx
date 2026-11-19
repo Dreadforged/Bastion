@@ -6,6 +6,7 @@ import { Controller } from "./lib/controller.js";
 import { Api, LocalTokenStore } from "./lib/http.js";
 import { IdbStateVault } from "./lib/vault.js";
 import { createMlsClient } from "./lib/wasm.js";
+import { liveKitCallOptions } from "./voice/livekit-room.js";
 import "./ui/styles.css";
 
 const root = document.getElementById("root");
@@ -17,7 +18,7 @@ const wsBase = apiBase.startsWith("http") ? apiBase.replace(/^http/, "ws") : `${
 
 const api = new Api({ baseUrl: apiBase, store: new LocalTokenStore(localStorage), onSignedOut: () => controller.signOut() });
 const auth = new AuthClient(api);
-const controller = new Controller({ api, auth, createMls: createMlsClient, vault: new IdbStateVault(), gatewayUrl: `${wsBase}/gateway` });
+const controller = new Controller({ api, auth, createMls: createMlsClient, vault: new IdbStateVault(), voiceRoom: liveKitCallOptions(), gatewayUrl: `${wsBase}/gateway` });
 void controller.start();
 
 createRoot(root).render(

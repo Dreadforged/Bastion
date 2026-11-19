@@ -2,6 +2,7 @@ import { schemas } from "@bastion/shared";
 
 type MessagePayload = schemas.MessagePayload;
 const { E2EE_LIMITS, MessagePayload } = schemas;
+import { adaptVoiceMls, type RawVoiceClient, type VoiceMls } from "../voice/mls.js";
 import { ApiError, newIdempotencyKey, type Api } from "./http.js";
 
 /**
@@ -38,6 +39,11 @@ export interface MlsClient {
   members(groupId: Uint8Array): Uint8Array[];
   inGroup(groupId: Uint8Array): boolean;
   saveState(): Uint8Array;
+  /**
+   * The same client's calls interface (exporter, self-update, call groups).
+   * Present on the real client only, so voice and messaging see the same groups.
+   */
+  voice?: VoiceMls;
 }
 
 /** The generated bindings, which return objects that must be freed. */
@@ -61,6 +67,7 @@ interface WasmModuleClient {
 
 export function adaptWasmClient(raw: WasmModuleClient): MlsClient {
   return {
+    voice: adaptVoiceMls(raw as unknown as RawVoiceClient),
     identityKey: () => raw.identityKey(),
     keyPackage: () => raw.keyPackage(),
     createGroup: (g) => raw.createGroup(g),
@@ -190,6 +197,8 @@ export class E2ee {
   private readonly sent = new Map<string, MessagePayload>();
   private readonly log = new Map<string, DecryptedMessage[]>();
   private readonly syncing = new Map<string, Promise<SyncResult>>();
+  /** Conversations made only to key a DM call. They are groups to sync, never chats to show. */
+  private readonly callGroups = new Set<string>();
   private saving: Promise<void> = Promise.resolve();
   private closed = false;
 
@@ -215,6 +224,52 @@ export class E2ee {
       log: [...this.log].map(([k, v]) => [k, v.slice(-KEEP_LOG)]),
     };
     return encodeBundle(this.o.mls.saveState(), meta);
+  }
+
+  /**
+   * Treat a conversation as the key group of a DM call: syncing it applies
+   * its welcome and commits like any other, but it never appears as a chat
+   * (see `isCallGroup`). Call this before syncing it, on both sides.
+   */
+  markCallGroup(conversationId: string): void {
+    this.callGroups.add(conversationId);
+  }
+
+  isCallGroup(conversationId: string): boolean {
+    return this.callGroups.has(conversationId);
+  }
+
+  /** Apply what is new in a conversation without caring about its messages. */
+  async syncGroup(conversationId: string): Promise<void> {
+    await this.sync(conversationId);
+  }
+
+  /** Where the group is made for a new call. Conversation ids are base64url of the MLS group id. */
+  groupIdOf(conversationId: string): Uint8Array {
+    return this.groupId(conversationId);
+  }
+
+  /**
+   * Voice's view of this device's MLS client: the same groups messaging uses.
+   * Anything that changes group state is saved, so a reload cannot leave this
+   * device behind a commit it already made.
+   */
+  voice(): VoiceMls {
+    const v = this.o.mls.voice;
+    if (!v) throw new Error("voice_unavailable");
+    const saved = <A extends unknown[], R>(fn: (...args: A) => R) =>
+      (...args: A): R => {
+        const out = fn(...args);
+        void this.persist();
+        return out;
+      };
+    return {
+      ...v,
+      createGroup: saved(v.createGroup),
+      commitAccepted: saved(v.commitAccepted),
+      commitRejected: saved(v.commitRejected),
+      join: saved(v.join),
+    };
   }
 
   /** Save now. Saves queue up so they never overlap; a failure is reported, not thrown. */

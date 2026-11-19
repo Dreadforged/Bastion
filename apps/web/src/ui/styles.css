@@ -35,3 +35,13 @@ button.link { background: none; border: 0; padding: 0 .25rem; color: LinkText; t
 .online .dot { background: #2ecc71; }
 .idle .dot { background: #f1c40f; }
 .dnd .dot { background: #e74c3c; }
+.participants { list-style: none; padding: 0 0 0 1rem; margin: 0 0 .25rem; font-size: .85rem; opacity: .85; }
+.sidebar li button.link { width: auto; }
+.callbar { border: 1px solid #8886; border-radius: .5rem; padding: .5rem; margin: .5rem 0; display: grid; gap: .35rem; }
+.callbar .controls { display: flex; flex-wrap: wrap; gap: .35rem; }
+.callbar .secure { color: #27ae60; }
+.callbar .warn { color: #c0392b; }
+.call-alerts { display: grid; gap: .35rem; margin: .5rem 0; }
+.call-alerts .ring { display: flex; gap: .35rem; align-items: center; flex-wrap: wrap; border: 1px solid highlight; border-radius: .5rem; padding: .4rem; }
+.call-alerts .notice { margin: 0; font-size: .85rem; }
+.content header.with-action { display: flex; justify-content: space-between; align-items: center; }
