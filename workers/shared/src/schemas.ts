@@ -50,3 +50,4 @@ export * from "./auth.js";
 export * from "./servers.js";
 export * from "./gateway.js";
 export * from "./moderation.js";
+export * from "./conversations.js";
