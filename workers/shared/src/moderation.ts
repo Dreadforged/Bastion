@@ -136,6 +136,8 @@ export const AuditAction = z.enum([
   "message.delete",
   "invite.delete",
   "report.update",
+  "voice.end_stream",
+  "voice.disconnect",
 ]);
 export type AuditAction = z.infer<typeof AuditAction>;
 
