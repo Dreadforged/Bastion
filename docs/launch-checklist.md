@@ -16,11 +16,12 @@ security model.
 - [ ] Public image uploads stay disabled until a real abuse scanner replaces the stub (`NoopScanner`), or are limited to private files only.
 - [ ] Account deletion exists, or the alpha terms say plainly that it does not and how to ask.
 - [ ] Legal basics done: terms, privacy policy, subprocessor list, abuse contact. (Legal is outside this repo.)
+- [ ] Safety Phase 0 done, per `safety-and-compliance-plan.md`: alpha is 18+ (decided 2026-11-19) but children are assumed present. Sign-up asks for age, platform reporting and the admin tool exist, contact controls and teen defaults are on, a named person owns child-safety reports, and the NCMEC registration is started.
 
 ## 2. Infrastructure (needs Nicole; nothing here is touched by code)
 
 - [ ] Domains chosen. Set `RP_ID`, `RP_NAME`, `APP_ORIGIN` for staging and production in `workers/api/wrangler.toml`. Add a separate `FILES_ORIGIN` domain. Passkeys are bound to `RP_ID`; changing it later invalidates every passkey.
-- [ ] Cloudflare: create D1, R2 and rate limit resources per environment and replace the placeholder ids. Apply the migrations in `workers/api/migrations/` (0001 to 0005) to staging, then production.
+- [ ] Cloudflare: create D1, R2 and rate limit resources per environment and replace the placeholder ids. Apply the migrations in `workers/api/migrations/` (0001 to 0006) to staging, then production.
 - [ ] Secrets set with `wrangler secret put`: `FILE_URL_SECRET`, R2 keys, LiveKit key and secret. Nothing secret in the repo.
 - [ ] Cloudflare logs: shortest retention, no IP addresses in logs. Cloudflare rate limiting rules configured for sign-up, sign-in and email sends.
 - [ ] Web app hosting chosen and deployed, with a strict Content-Security-Policy and security headers (the browser key vault relies on it).
