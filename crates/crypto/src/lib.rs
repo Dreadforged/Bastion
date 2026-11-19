@@ -1,11 +1,14 @@
 //! Bastion encryption core.
 //!
-//! Message padding and safety codes. Group key management on OpenMLS
-//! comes next.
+//! Wraps OpenMLS to give each device group key management and message
+//! encryption. The server only ever sees the TLS-encoded MLS messages this
+//! crate produces; it orders and stores them but can't read them.
 
+pub mod client;
 pub mod padding;
 pub mod safety;
 
+pub use client::{Client, CommitOut, Incoming};
 pub use safety::safety_code;
 
 /// MLS protocol version the core targets (RFC 9420).
@@ -18,6 +21,12 @@ pub enum CryptoError {
     MessageTooLarge,
     /// Input bytes couldn't be decoded.
     Malformed,
+    /// This device has no state for the group.
+    UnknownGroup,
+    /// A named member isn't in the group.
+    NotAMember,
+    /// OpenMLS rejected the operation.
+    Mls(String),
 }
 
 impl core::fmt::Display for CryptoError {
@@ -25,6 +34,9 @@ impl core::fmt::Display for CryptoError {
         match self {
             CryptoError::MessageTooLarge => f.write_str("message too large"),
             CryptoError::Malformed => f.write_str("malformed input"),
+            CryptoError::UnknownGroup => f.write_str("unknown group"),
+            CryptoError::NotAMember => f.write_str("not a member"),
+            CryptoError::Mls(e) => write!(f, "mls: {e}"),
         }
     }
 }
