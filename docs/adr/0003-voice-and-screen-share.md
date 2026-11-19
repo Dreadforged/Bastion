@@ -52,6 +52,12 @@ moderators to be able to act on a call as fast as on a text channel.
 - **Room size.** A voice room holds at most 99 people, streaming or not
   (`VOICE_LIMITS.maxRoomParticipants`), one under LiveKit's own backstop of 100.
   A join over it gets `room_full`.
+- **Stream limits.** At most 4 live streams in one room (`too_many_streams`),
+  and 1 live stream per account across all servers. The per room count is in
+  the Server object. The per account slot is a lease in D1 (`live_streams`:
+  user id, server id, expiry; renewed by the voice heartbeat, deleted when the
+  stream stops or the person leaves, lapsed after 90 seconds). DM calls are not
+  counted: they have two people.
 - **Not in the default permissions.** STREAM is bit 15 and is not in the
   default @everyone set. Servers turn it on for roles or channels.
 

@@ -182,6 +182,18 @@ No current code choice prevents a later self-hosted edition.
 Not built on purpose: stream count caps, per account stream limits and the
 metrics counter, because each needs a number or a privacy call from Nicole.
 
+## Built after Nicole approved the limits
+
+- 4 live streams per room (`VOICE_LIMITS.maxStreamsPerRoom`, `too_many_streams`),
+  checked in the Server object when a stream starts.
+- 1 live stream per account across servers: a lease table `live_streams` in D1
+  (migration 0008), claimed when a stream starts and renewed by heartbeats.
+  Cleared on stop or leave, lapses after 90 seconds, swept by the cron.
+  Moderator end-stream frees the slot at the person's next heartbeat (within
+  30 seconds). Known edge: a heartbeat that finds the slot taken by another
+  server cannot stop an already live stream; the next start there is refused.
+- Cost items 4 and 11 above are now done; items 5 (per server caps) and 6 remain.
+
 ## Prioritized next chunks
 
 | # | Chunk | Size | Needs servers? | Why now |
