@@ -167,6 +167,52 @@ describe("channel override edge cases", () => {
   });
 });
 
+describe("STREAM", () => {
+  it("is bit 15, after ADMINISTRATOR, and part of ALL_PERMISSIONS", () => {
+    expect(P.STREAM).toBe(1n << 15n);
+    expect(has(ALL_PERMISSIONS, P.STREAM)).toBe(true);
+  });
+
+  it("is not granted by the default @everyone set", () => {
+    expect(has(computePermissions(ctx()), P.STREAM)).toBe(false);
+  });
+
+  it("comes from @everyone or a member role", () => {
+    const viaRole = computePermissions(ctx({ memberRoles: [{ id: "streamer", permissions: P.STREAM }] }));
+    expect(has(viaRole, P.STREAM)).toBe(true);
+    const viaEveryone = computePermissions(ctx({ everyoneRole: { id: "everyone", permissions: P.VIEW_CHANNEL | P.STREAM } }));
+    expect(has(viaEveryone, P.STREAM)).toBe(true);
+  });
+
+  it("can be denied in one channel by a role override", () => {
+    const perms = computePermissions(
+      ctx({
+        memberRoles: [{ id: "streamer", permissions: P.STREAM }],
+        channel: { roles: { streamer: { allow: 0n, deny: P.STREAM } } },
+      }),
+    );
+    expect(has(perms, P.STREAM)).toBe(false);
+  });
+
+  it("can be allowed in one channel by a member override", () => {
+    const perms = computePermissions(ctx({ channel: { members: { user: { allow: P.STREAM, deny: 0n } } } }));
+    expect(has(perms, P.STREAM)).toBe(true);
+  });
+
+  it("is granted to the owner and administrators", () => {
+    expect(has(computePermissions(ctx({ userId: "owner" })), P.STREAM)).toBe(true);
+    const admin = { id: "admin", permissions: P.ADMINISTRATOR };
+    expect(has(computePermissions(ctx({ memberRoles: [admin], channel: {} })), P.STREAM)).toBe(true);
+  });
+
+  it("is removed by a timeout", () => {
+    const everyone = { id: "everyone", permissions: P.VIEW_CHANNEL | P.STREAM | P.CONNECT_VOICE };
+    expect(has(computeBasePermissions(ctx({ everyoneRole: everyone, timedOut: true })), P.STREAM)).toBe(false);
+    const channel = { members: { user: { allow: P.STREAM, deny: 0n } } };
+    expect(has(computePermissions(ctx({ everyoneRole: everyone, channel, timedOut: true })), P.STREAM)).toBe(false);
+  });
+});
+
 describe("timeouts", () => {
   const everything = { id: "everyone", permissions: ALL_PERMISSIONS & ~P.ADMINISTRATOR };
 
