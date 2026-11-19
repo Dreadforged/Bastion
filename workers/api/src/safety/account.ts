@@ -241,7 +241,7 @@ export async function applyVerifiedAge(
 }
 
 /** Hourly: move people up a band when the month their band ends has passed, and drop old signals. */
-export async function advanceAgeBands(db: D1Database, flags: FlagReader, now: number): Promise<number> {
+export async function advanceAgeBands(db: D1Database, flags: FlagReader, now: number, onChanged?: (userId: string) => Promise<void>): Promise<number> {
   await db.prepare("DELETE FROM age_signals WHERE expires_at <= ?").bind(now).run();
   const { results } = await db
     .prepare("SELECT id, age_band, age_band_until FROM users WHERE age_band_until IS NOT NULL AND age_band_until <= ?")
@@ -258,6 +258,7 @@ export async function advanceAgeBands(db: D1Database, flags: FlagReader, now: nu
       await db.prepare("UPDATE users SET age_band = '18plus', age_band_until = NULL WHERE id = ?").bind(u.id).run();
       await applyMinimumAge(db, flags, u.id, 18, now);
     }
+    await onChanged?.(u.id);
   }
   return results.length;
 }

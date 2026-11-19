@@ -6,6 +6,7 @@ import { advanceAgeBands, applyVerifiedAge, ageInYears, declareAge, getSafety, r
 import { FlagReader, regionChain, setFlag } from "../src/safety/flags.js";
 import { assertNotHeld, isHeld, placeHold, releaseHold } from "../src/safety/holds.js";
 import { handleSafety } from "../src/safety/routes.js";
+import { syncAgeLimit } from "../src/safety/enforce.js";
 import { setAccountState } from "../src/safety/staff.js";
 import { createTestD1 } from "./d1.js";
 
@@ -412,5 +413,40 @@ describe("the migration", () => {
       account_state: "active",
       country: null,
     });
+  });
+});
+
+describe("age limit sync", () => {
+  it("tells every server the person is in whether to hide age restricted channels", async () => {
+    const calls: [string, string, boolean][] = [];
+    const sessions = { idFromName: (n: string) => n, get: () => ({ listServerIds: async () => ["s1", "s2"] }) } as never;
+    const servers = { idFromName: (n: string) => n, get: (id: string) => ({ setAgeLimit: async (u: string, on: boolean) => { calls.push([id, u, on]); } }) } as never;
+    const deps = { db, sessions, servers };
+    const { userId } = await signedIn();
+
+    await syncAgeLimit(deps, userId); // band unknown
+    expect(calls).toEqual([["s1", userId, true], ["s2", userId, true]]);
+
+    calls.length = 0;
+    await db.prepare("UPDATE users SET age_band = '18plus' WHERE id = ?").bind(userId).run();
+    await syncAgeLimit(deps, userId);
+    expect(calls.map((c) => c[2])).toEqual([false, false]);
+
+    calls.length = 0;
+    await db.prepare("UPDATE users SET account_state = 'pending_age_review' WHERE id = ?").bind(userId).run();
+    await syncAgeLimit(deps, userId);
+    expect(calls.map((c) => c[2])).toEqual([true, true]);
+  });
+
+  it("runs after an age declaration, including a refused one", async () => {
+    const changed: string[] = [];
+    const s = await signedIn();
+    const req = (body: unknown) =>
+      handleSafety(new Request("https://api.test/account/age", { method: "PUT", headers: { authorization: `Bearer ${s.token}` }, body: JSON.stringify(body) }), {
+        db, flags, now: () => now, onAgeChange: async (u) => { changed.push(u); },
+      });
+    expect((await req(birth(30)))!.status).toBe(200);
+    expect((await req(birth(5)))!.status).toBe(403);
+    expect(changed).toEqual([s.userId, s.userId]);
   });
 });

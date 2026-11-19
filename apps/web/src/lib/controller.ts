@@ -6,10 +6,11 @@ import { decodeBundle, E2ee, type DecryptedMessage, type MlsClient, type Persist
 import { Gateway, type GatewayOptions, type GatewayStatus } from "./gateway.js";
 import { Api, ApiError, newIdempotencyKey } from "./http.js";
 import { buildChatExport, type ChatExport } from "./privacy.js";
+import { gateFor, type Gate } from "./safety.js";
 import { applyEvent, applyReady, emptyState, mergeHistory, type ChatState } from "./store.js";
 import type { StateVault } from "./vault.js";
 
-export type Phase = "signed-out" | "connecting" | "ready";
+export type Phase = "signed-out" | "safety-gate" | "connecting" | "ready";
 
 export interface DirectChat {
   conversationId: string;
@@ -19,6 +20,8 @@ export interface DirectChat {
 
 export interface AppState {
   phase: Phase;
+  /** Set while phase is "safety-gate": what the person has to deal with before the app opens. */
+  gate: Gate | null;
   gateway: GatewayStatus;
   chat: ChatState;
   /** Decrypted channel messages by message id; null means this device can't read it. */
@@ -54,6 +57,7 @@ export interface ControllerOptions {
 export class Controller {
   private state: AppState = {
     phase: "signed-out",
+    gate: null,
     gateway: "idle",
     chat: emptyState,
     plaintext: {},
@@ -109,7 +113,73 @@ export class Controller {
 
   /** Call after a passkey sign-in or registration has stored tokens. */
   async connect(): Promise<void> {
-    this.set({ phase: "connecting" });
+    this.set({ phase: "connecting", gate: null });
+    let gate: Gate | null;
+    try {
+      gate = gateFor(await this.o.api.get<schemas.AccountSafety>("/account/safety"));
+    } catch (err) {
+      // A blocked account fails at the token check; anything else is a failed load. Either way, no app.
+      await this.reset();
+      this.set({ error: err instanceof ApiError ? err.code : "something_went_wrong" });
+      return;
+    }
+    if (gate?.kind === "blocked") {
+      await this.reset();
+      this.set({ error: "account_blocked" });
+      return;
+    }
+    if (gate) {
+      this.set({ phase: "safety-gate", gate });
+      return;
+    }
+    await this.openGateway();
+  }
+
+  /** Age declaration for the sign-up gate. The server keeps only the band. */
+  async declareAge(birthYear: number, birthMonth: number, country?: string): Promise<void> {
+    this.set({ error: null });
+    try {
+      const safety = await this.o.api.put<schemas.AccountSafety>("/account/age", { birthYear, birthMonth, ...(country ? { country } : {}) });
+      await this.afterGate(safety);
+    } catch (err) {
+      if (err instanceof ApiError && err.code === "underage") {
+        await this.reset();
+        this.set({ error: "underage" });
+        return;
+      }
+      if (err instanceof ApiError && err.code === "already_declared") {
+        await this.afterGate(await this.o.api.get<schemas.AccountSafety>("/account/safety"));
+        return;
+      }
+      this.set({ error: err instanceof Error ? err.message : "something_went_wrong" });
+    }
+  }
+
+  /** Accept every outstanding document at the version shown. */
+  async acceptTerms(): Promise<void> {
+    this.set({ error: null });
+    try {
+      const gate = this.state.gate;
+      if (gate?.kind !== "terms") return;
+      let safety: schemas.AccountSafety | undefined;
+      for (const d of gate.outstanding) safety = await this.o.api.post<schemas.AccountSafety>("/account/terms", d);
+      if (safety) await this.afterGate(safety);
+    } catch (err) {
+      this.set({ error: err instanceof Error ? err.message : "something_went_wrong" });
+    }
+  }
+
+  private async afterGate(safety: schemas.AccountSafety): Promise<void> {
+    const gate = gateFor(safety);
+    if (gate?.kind === "blocked") {
+      await this.signOut();
+      this.set({ error: "account_blocked" });
+    } else if (gate) this.set({ gate });
+    else await this.openGateway();
+  }
+
+  private async openGateway(): Promise<void> {
+    this.set({ phase: "connecting", gate: null });
     const devices = await this.o.auth.devices();
     this.deviceId = devices.find((d) => d.current)?.id ?? null;
     this.gateway?.close();
@@ -270,7 +340,7 @@ export class Controller {
     if (this.ringTimer) clearTimeout(this.ringTimer);
     this.ringTimer = null;
     this.convInfo.clear();
-    this.set({ phase: "signed-out", chat: emptyState, plaintext: {}, dms: {}, voice: null, incomingCalls: [], callNotice: null, gateway: "idle" });
+    this.set({ phase: "signed-out", gate: null, chat: emptyState, plaintext: {}, dms: {}, voice: null, incomingCalls: [], callNotice: null, gateway: "idle" });
     await voice?.reset();
     // Let queued saves land first, otherwise one could write state back after the wipe.
     await e2ee?.close();
@@ -408,6 +478,22 @@ export class Controller {
     return this.o.api.put<schemas.PrivacySettings>("/account/privacy", change);
   }
 
+  /**
+   * Delete this account. Refused with `legal_hold` (kept for a legal reason we may not
+   * be able to explain) or `owns_servers` (delete or hand on your servers first).
+   * Resolves to the refusal code, or null once the account is gone and this device is wiped.
+   */
+  async deleteAccount(): Promise<string | null> {
+    try {
+      await this.o.api.delete("/account", { confirm: "delete my account" });
+    } catch (err) {
+      return err instanceof ApiError ? err.code : "something_went_wrong";
+    }
+    this.o.api.setTokens(null);
+    await this.reset();
+    return null;
+  }
+
   /** What the server holds about this account. */
   accountExport() {
     return this.o.api.get<schemas.AccountExport>("/account/export");
@@ -417,6 +503,27 @@ export class Controller {
   chatExport(): ChatExport {
     const s = this.state;
     return buildChatExport({ userId: s.chat.userId, dms: s.dms, channelMessages: s.chat.messages, plaintext: s.plaintext }, Date.now());
+  }
+
+  // ---------------------------------------------------------------- message requests
+
+  /** Messages from people you share no server with, waiting for you to accept or decline. */
+  messageRequests() {
+    return this.o.api.get<schemas.MessageRequest[]>("/conversations/requests");
+  }
+
+  /** Accept a request: the conversation joins your direct messages. */
+  async acceptRequest(request: schemas.MessageRequest): Promise<void> {
+    await this.guard(async () => {
+      await this.o.api.post(`/conversations/${request.conversationId}/accept`);
+      this.convInfo.set(request.conversationId, { kind: "dm", peerId: request.from });
+      await this.syncDm(request.conversationId, request.from);
+    });
+  }
+
+  /** Decline a request. The sender is not told, and cannot ask again. */
+  async declineRequest(request: schemas.MessageRequest): Promise<void> {
+    await this.guard(() => this.o.api.post(`/conversations/${request.conversationId}/decline`));
   }
 
   // ---------------------------------------------------------------- direct messages

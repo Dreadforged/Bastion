@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { tokenFromHash, type AuthClient } from "../lib/auth.js";
 import type { Controller } from "../lib/controller.js";
+import { errorText } from "./SafetyGate.js";
 
 type Mode = "sign-in" | "sign-up" | "add-device";
 
@@ -10,7 +11,7 @@ function defaultDeviceName(): string {
   return `${browser} on ${navigator.platform || "this device"}`.slice(0, 64);
 }
 
-export function AuthScreen({ controller, auth }: { controller: Controller; auth: AuthClient }) {
+export function AuthScreen({ controller, auth, notice }: { controller: Controller; auth: AuthClient; notice?: string | null }) {
   const [mode, setMode] = useState<Mode>("sign-in");
   const [email, setEmail] = useState("");
   const [sent, setSent] = useState(false);
@@ -69,7 +70,7 @@ export function AuthScreen({ controller, auth }: { controller: Controller; auth:
   return (
     <main className="auth">
       <h1>Bastion</h1>
-      <p className="tag">Private chat. Only the people in a conversation can read it.</p>
+      <p className="tag">Private chat. Only the people in a conversation can read it. The alpha is for people 18 and older.</p>
       {mode === "sign-in" && (
         <>
           <button disabled={busy} onClick={() => run(async () => { await auth.signIn(); await controller.connect(); })}>
@@ -103,6 +104,7 @@ export function AuthScreen({ controller, auth }: { controller: Controller; auth:
       )}
       {sent && <p>Check your email for a link. It expires in 15 minutes.</p>}
       {error && <p role="alert" className="error">{error}</p>}
+      {!error && notice && <p role="alert" className="error">{errorText(notice)}</p>}
     </main>
   );
 }

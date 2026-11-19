@@ -3,6 +3,13 @@ import { useEffect, useState } from "react";
 import type { Controller } from "../lib/controller.js";
 import { downloadJson } from "../lib/privacy.js";
 
+const DELETE_REFUSALS: Record<string, string> = {
+  owns_servers: "You own at least one server. Delete it or hand it on first, then try again.",
+  // Deliberately vague: we may be unable to say why.
+  legal_hold: "We can't delete this account right now. Please contact support.",
+  rate_limited: "Too many tries. Please wait a while.",
+};
+
 /** Settings, Privacy and data. */
 export function Settings({ controller }: { controller: Controller }) {
   const [settings, setSettings] = useState<schemas.PrivacySettings | null>(null);
@@ -16,8 +23,18 @@ export function Settings({ controller }: { controller: Controller }) {
     setMessage(null);
     try {
       setSettings(await controller.updatePrivacy(next));
-    } catch {
-      setMessage("Could not save that change.");
+    } catch (err) {
+      setMessage(err instanceof Error && err.message === "teen_default_locked" ? "That choice is not available to accounts under 18." : "Could not save that change.");
+    }
+  }
+
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  async function deleteAccount() {
+    setMessage(null);
+    const refusal = await controller.deleteAccount();
+    if (refusal) {
+      setConfirmDelete(false);
+      setMessage(DELETE_REFUSALS[refusal] ?? "Could not delete your account right now. Please try again later.");
     }
   }
 
@@ -50,10 +67,12 @@ export function Settings({ controller }: { controller: Controller }) {
           onChange={(e) => void change({ dmPolicy: e.target.value as schemas.DmPolicy })}
         >
           <option value="everyone">Anyone</option>
+          <option value="requests">People I share a server with, and requests from others</option>
           <option value="nobody">Nobody</option>
         </select>
       </label>
       <p className="hint">Conversations you already have keep working. You can still message others.</p>
+      <p className="hint">If you are under 18, requests is the least strict choice available, so people you do not share a server with have to ask first.</p>
 
       <h3>What others see</h3>
       <label>
@@ -77,6 +96,20 @@ export function Settings({ controller }: { controller: Controller }) {
         <button onClick={() => void exportAccount()}>Export my account data</button>
         <button onClick={() => downloadJson("bastion-messages-export.json", controller.chatExport())}>Export messages on this device</button>
       </div>
+
+      <h3>Delete your account</h3>
+      <p className="hint">
+        This removes your account, passkeys and files and takes you out of every server and conversation. Messages already delivered to other
+        people stay on their devices. It cannot be undone.
+      </p>
+      {!confirmDelete ? (
+        <button onClick={() => setConfirmDelete(true)}>Delete my account…</button>
+      ) : (
+        <div className="controls">
+          <button onClick={() => void deleteAccount()}>Yes, delete my account</button>
+          <button onClick={() => setConfirmDelete(false)}>Keep it</button>
+        </div>
+      )}
     </section>
   );
 }

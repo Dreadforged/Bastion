@@ -1,4 +1,4 @@
-import { Permission } from "@bastion/shared";
+import { Permission, type schemas } from "@bastion/shared";
 import { useEffect, useRef, useState } from "react";
 import type { AppState, Controller } from "../lib/controller.js";
 import { sortedChannels, typingUsers } from "../lib/store.js";
@@ -75,7 +75,7 @@ export function Shell({ controller, state }: { controller: Controller; state: Ap
             <ChannelList controller={controller} serverId={server.server.id} state={state} view={view} onPick={pickChannel} />
           </>
         ) : (
-          <DmList state={state} view={view} onOpen={(conversationId) => setView({ kind: "dm", conversationId })} />
+          <DmList controller={controller} state={state} view={view} onOpen={(conversationId) => setView({ kind: "dm", conversationId })} />
         )}
         <CallAlerts controller={controller} state={state} />
         {state.voice && <CallBar controller={controller} ui={state.voice} />}
@@ -250,9 +250,30 @@ function ChannelView({ controller, state, serverId, channelId }: { controller: C
   );
 }
 
-function DmList({ state, view, onOpen }: { state: AppState; view: View; onOpen: (id: string) => void }) {
+function DmList({ controller, state, view, onOpen }: { controller: Controller; state: AppState; view: View; onOpen: (id: string) => void }) {
+  const [requests, setRequests] = useState<schemas.MessageRequest[]>([]);
+  useEffect(() => {
+    controller.messageRequests().then(setRequests, () => setRequests([]));
+  }, [controller, state.phase]);
+  async function answer(r: schemas.MessageRequest, accept: boolean) {
+    await (accept ? controller.acceptRequest(r) : controller.declineRequest(r));
+    setRequests((list) => list.filter((x) => x.conversationId !== r.conversationId));
+  }
   return (
     <>
+      {requests.length > 0 && (
+        <>
+          <h2>Message requests</h2>
+          <ul>
+            {requests.map((r) => (
+              <li key={r.conversationId}>
+                {shortId(r.from)} wants to message you{" "}
+                <button onClick={() => void answer(r, true)}>Accept</button> <button onClick={() => void answer(r, false)}>Decline</button>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
       <h2>Direct messages</h2>
       <ul>
         {Object.values(state.dms).map((d) => (

@@ -32,7 +32,7 @@ const sessions = {
 
 const servers = {
   idFromName: (name: string) => name,
-  get: (id: string) => ({ handle: (u: string, op: unknown, key: string | null) => world.server(id).handle(u, op, key) }),
+  get: (id: string) => ({ handle: (u: string, op: unknown, key: string | null) => world.server(id).handle(u, op, key), setAgeLimit: async (u: string, on: boolean) => world.server(id).setAgeLimit(u, on) }),
 } as unknown as DurableObjectNamespace<Server>;
 
 const objects = new Map<string, ConversationCore>();
@@ -237,5 +237,27 @@ describe("account export", () => {
     const me = await signedIn();
     expect((await account("GET", "/account/nothing", me)).status).toBe(404);
     expect((await account("DELETE", "/account/export", me)).status).toBe(404);
+  });
+});
+
+describe("teen DM defaults in privacy settings", () => {
+  const setBand = (userId: string, band: string) => db.prepare("UPDATE users SET age_band = ? WHERE id = ?").bind(band, userId).run();
+
+  it("shows a teen the policy that is enforced, and refuses to loosen it", async () => {
+    const teen = await signedIn();
+    await setBand(teen.userId, "16to17");
+    expect((await account("GET", "/account/privacy", teen)).body.dmPolicy).toBe("requests");
+    expect(await account("PUT", "/account/privacy", teen, { dmPolicy: "everyone" })).toMatchObject({ status: 403, body: { error: "teen_default_locked" } });
+    const tighter = await account("PUT", "/account/privacy", teen, { dmPolicy: "nobody" });
+    expect(tighter).toMatchObject({ status: 200, body: { dmPolicy: "nobody" } });
+    expect((await account("PUT", "/account/privacy", teen, { typingIndicators: false })).body.dmPolicy).toBe("nobody");
+  });
+
+  it("lets an adult choose everyone, requests or nobody", async () => {
+    const adult = await signedIn();
+    await setBand(adult.userId, "18plus");
+    for (const dmPolicy of ["requests", "nobody", "everyone"]) {
+      expect((await account("PUT", "/account/privacy", adult, { dmPolicy })).body.dmPolicy).toBe(dmPolicy);
+    }
   });
 });

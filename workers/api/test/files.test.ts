@@ -80,7 +80,7 @@ beforeEach(() => {
 
 const servers = {
   idFromName: (name: string) => name,
-  get: (id: string) => ({ handle: (u: string, op: unknown, key: string | null) => world.server(id).handle(u, op, key) }),
+  get: (id: string) => ({ handle: (u: string, op: unknown, key: string | null) => world.server(id).handle(u, op, key), setAgeLimit: async (u: string, on: boolean) => world.server(id).setAgeLimit(u, on) }),
 } as unknown as DurableObjectNamespace<Server>;
 
 function deps(): FileRouteDeps {

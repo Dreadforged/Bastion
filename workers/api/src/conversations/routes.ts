@@ -1,10 +1,12 @@
 import { schemas } from "@bastion/shared";
 import type { Conversation, ConversationOpInput, ConversationReply } from "@bastion/durable";
-import { getPrivacy } from "../account/privacy.js";
+import { contactRules, type SharesServer } from "../account/contact.js";
+import type { FlagReader } from "../safety/flags.js";
 import { AuthError } from "../auth/errors.js";
 import { toBase64Url } from "../auth/crypto.js";
 import { json } from "../auth/routes.js";
 import { authenticate, type Principal } from "../auth/sessions.js";
+import { requireNewContact, requireWritable } from "../safety/enforce.js";
 import { body, HttpError, id, query } from "../http.js";
 import { applyVoiceEffects, issueToken, type VoiceDeps } from "../voice/livekit.js";
 import { claimKeyPackages, devicesBelong, identityKeys, stock, uploadKeyPackages } from "./keys.js";
@@ -19,6 +21,51 @@ export interface ConversationRouteDeps {
   voice?: VoiceDeps | undefined;
   /** A user's plan, for screen share quality. Everyone is on free if unset. */
   planFor?: ((userId: string) => Promise<schemas.Plan>) | undefined;
+  /** Region flags, for teen DM defaults and message requests. Built in defaults when unset. */
+  flags?: FlagReader | undefined;
+  /** Whether two people share a server. Without it, nobody does, so every stranger DM is a request. */
+  sharesServer?: SharesServer | undefined;
+}
+
+interface PairRow {
+  user_a: string;
+  user_b: string;
+  status: "active" | "request" | "declined";
+  requested_by: string | null;
+  request_sends: number;
+}
+
+async function pairFor(db: D1Database, conversationId: string): Promise<PairRow | null> {
+  return db
+    .prepare("SELECT user_a, user_b, status, requested_by, request_sends FROM dm_pairs WHERE conversation_id = ?")
+    .bind(conversationId)
+    .first<PairRow>();
+}
+
+/**
+ * Limits on a DM that is still a message request. The requester gets
+ * `MESSAGE_REQUEST_SENDS` messages; a declined pair gets none. The recipient
+ * replying counts as accepting. The server cannot see what is sent, only how many.
+ */
+async function checkSend(db: D1Database, conversationId: string, senderId: string): Promise<void> {
+  const pair = await pairFor(db, conversationId);
+  if (!pair || pair.status === "active") return;
+  if (pair.status === "declined") throw new HttpError(403, "message_request_declined");
+  if (pair.requested_by !== senderId) {
+    await db.prepare("UPDATE dm_pairs SET status = 'active' WHERE conversation_id = ?").bind(conversationId).run();
+    return;
+  }
+  const bumped = await db
+    .prepare("UPDATE dm_pairs SET request_sends = request_sends + 1 WHERE conversation_id = ? AND status = 'request' AND request_sends < ?")
+    .bind(conversationId, schemas.MESSAGE_REQUEST_SENDS)
+    .run();
+  if (bumped.meta.changes === 0) throw new HttpError(403, "message_request_pending");
+}
+
+/** Calls only start in an accepted DM. */
+async function requireActiveDm(db: D1Database, conversationId: string): Promise<void> {
+  const pair = await pairFor(db, conversationId);
+  if (pair && pair.status !== "active") throw new HttpError(403, pair.status === "declined" ? "message_request_declined" : "message_request_pending");
 }
 
 /**
@@ -83,9 +130,22 @@ async function create(deps: ConversationRouteDeps, principal: Principal, request
     if (!peer) throw new HttpError(404, "unknown_user");
     const [a, b] = [principal.userId, req.userId].sort() as [string, string];
     // Only a new DM is refused; an existing one keeps working.
-    const existing = await db.prepare("SELECT 1 AS x FROM dm_pairs WHERE user_a = ? AND user_b = ?").bind(a, b).first();
-    if (!existing && (await getPrivacy(db, req.userId)).dmPolicy === "nobody") throw new HttpError(403, "cannot_message_user");
-    await db.prepare("INSERT OR IGNORE INTO dm_pairs (user_a, user_b, conversation_id) VALUES (?, ?, ?)").bind(a, b, newId).run();
+    const existing = await db.prepare("SELECT status FROM dm_pairs WHERE user_a = ? AND user_b = ?").bind(a, b).first<{ status: string }>();
+    // A declined request stays declined, whoever tries again.
+    if (existing?.status === "declined") throw new HttpError(403, "cannot_message_user");
+    let status: "active" | "request" = "active";
+    if (!existing) {
+      const rules = await contactRules(db, deps.flags, req.userId);
+      if (rules.policy === "nobody") throw new HttpError(403, "cannot_message_user");
+      if (rules.policy === "requests" && !(await (deps.sharesServer?.(principal.userId, req.userId) ?? false))) {
+        if (!rules.messageRequests) throw new HttpError(403, "cannot_message_user");
+        status = "request";
+      }
+    }
+    await db
+      .prepare("INSERT OR IGNORE INTO dm_pairs (user_a, user_b, conversation_id, status, requested_by) VALUES (?, ?, ?, ?, ?)")
+      .bind(a, b, newId, status, status === "request" ? principal.userId : null)
+      .run();
     const row = await db.prepare("SELECT conversation_id FROM dm_pairs WHERE user_a = ? AND user_b = ?").bind(a, b).first<{ conversation_id: string }>();
     if (row!.conversation_id !== newId) {
       const r = (await stub(row!.conversation_id).handle(creator, { type: "get" }, null)) as unknown as ConversationReply;
@@ -121,6 +181,27 @@ async function create(deps: ConversationRouteDeps, principal: Principal, request
   }
   await applyEffects(db, newId, r);
   return reply(r);
+}
+
+/**
+ * The recipient of a message request accepts it, or declines it. Declining
+ * takes them out of the conversation, and the requester cannot try again.
+ */
+async function answerRequest(deps: ConversationRouteDeps, principal: Principal, cid: string, action: "accept" | "decline"): Promise<Response> {
+  const pair = await pairFor(deps.db, cid);
+  if (!pair || pair.status !== "request" || pair.requested_by === principal.userId || (pair.user_a !== principal.userId && pair.user_b !== principal.userId)) {
+    throw new HttpError(404, "not_found");
+  }
+  if (action === "accept") {
+    await deps.db.prepare("UPDATE dm_pairs SET status = 'active' WHERE conversation_id = ?").bind(cid).run();
+    return json(null, 204);
+  }
+  await deps.db.batch([
+    deps.db.prepare("UPDATE dm_pairs SET status = 'declined' WHERE conversation_id = ?").bind(cid),
+    deps.db.prepare("DELETE FROM conversation_members WHERE conversation_id = ? AND user_id = ?").bind(cid, principal.userId),
+  ]);
+  await deps.conversations.get(deps.conversations.idFromName(cid)).revoke([principal.userId]);
+  return json(null, 204);
 }
 
 /**
@@ -217,6 +298,8 @@ async function checkCallGroup(db: D1Database, dmId: string, callerId: string, gr
  *   POST /keys/packages/claim      take one package per device of some users
  *   GET  /users/:id/keys           a user's device identity keys
  *   GET  /conversations            ids of the caller's conversations
+ *   GET  /conversations/requests   DMs waiting for the caller to accept
+ *   POST /conversations/:id/accept | /decline   answer a message request
  *   POST /conversations            start a DM, group or channel conversation
  *   GET  /conversations/:id        members, devices and epoch
  *   GET  /conversations/:id/envelopes?after=&limit=
@@ -239,6 +322,7 @@ export async function handleConversations(request: Request, deps: ConversationRo
       const { success } = await deps.userLimit.limit({ key: principal.userId });
       if (!success) throw new HttpError(429, "rate_limited");
     }
+    requireWritable(principal, m);
     const { db } = deps;
     const large = schemas.E2EE_LIMITS.maxBodyBytes;
 
@@ -248,6 +332,7 @@ export async function handleConversations(request: Request, deps: ConversationRo
       }
       if (n === 3 && parts[2] === "count" && m === "GET") return json({ count: await stock(db, principal.deviceId) });
       if (n === 3 && parts[2] === "claim" && m === "POST") {
+        requireNewContact(principal);
         const { userIds } = await body(request, schemas.ClaimKeyPackagesRequest);
         return json(await claimKeyPackages(db, principal, userIds));
       }
@@ -259,14 +344,39 @@ export async function handleConversations(request: Request, deps: ConversationRo
     if (root === "conversations") {
       if (n === 1 && m === "GET") {
         const { results } = await db
-          .prepare("SELECT conversation_id FROM conversation_members WHERE user_id = ? ORDER BY conversation_id")
+          .prepare(
+            `SELECT cm.conversation_id FROM conversation_members cm
+             LEFT JOIN dm_pairs p ON p.conversation_id = cm.conversation_id
+             WHERE cm.user_id = ?1 AND (p.status IS NULL OR p.status = 'active' OR (p.status = 'request' AND p.requested_by = ?1))
+             ORDER BY cm.conversation_id`,
+          )
           .bind(principal.userId)
           .all<{ conversation_id: string }>();
         return json({ ids: results.map((r) => r.conversation_id) });
       }
-      if (n === 1 && m === "POST") return await create(deps, principal, request);
+      if (n === 2 && parts[1] === "requests" && m === "GET") {
+        const { results } = await db
+          .prepare(
+            `SELECT conversation_id, requested_by FROM dm_pairs
+             WHERE status = 'request' AND requested_by != ?1 AND (user_a = ?1 OR user_b = ?1) ORDER BY conversation_id`,
+          )
+          .bind(principal.userId)
+          .all<{ conversation_id: string; requested_by: string }>();
+        const out: schemas.MessageRequest[] = results.map((r) => ({ conversationId: r.conversation_id, from: r.requested_by }));
+        return json(out);
+      }
+      if (n === 1 && m === "POST") {
+        requireNewContact(principal);
+        return await create(deps, principal, request);
+      }
 
       const cid = conversationId(parts[1]);
+      if (n === 3 && (parts[2] === "accept" || parts[2] === "decline") && m === "POST") return await answerRequest(deps, principal, cid, parts[2]);
+      // Starting a call is new contact; answering one (accept, decline) is not.
+      if (parts[2] === "call" && n === 3 && m === "POST") {
+        requireNewContact(principal);
+        await requireActiveDm(db, cid);
+      }
       if (parts[2] === "call" && n <= 4) return await callRoute(deps, principal, cid, parts[3], request);
       const actor = { userId: principal.userId, deviceId: principal.deviceId };
       let op: ConversationOpInput | null = null;
@@ -281,6 +391,7 @@ export async function handleConversations(request: Request, deps: ConversationRo
       }
       if (!op) return json({ error: "not_found" }, 404);
 
+      if (op.type === "send") await checkSend(db, cid, principal.userId);
       const key = idempotencyKey(request, op.type === "send" || op.type === "commit");
       const stub = deps.conversations.get(deps.conversations.idFromName(cid));
       const r = (await stub.handle(actor, op, key)) as unknown as ConversationReply;

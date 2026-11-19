@@ -58,6 +58,11 @@ export class Server extends DurableObject<DurableEnv> {
     return this.core.snapshot(userId);
   }
 
+  async setAgeLimit(userId: string, limited: boolean): Promise<void> {
+    this.core.setAgeLimit(userId, limited);
+    await this.afterWrite();
+  }
+
   async setPresence(userId: string, status: schemas.PresenceStatus | "offline"): Promise<void> {
     this.core.setPresence(userId, status);
     await this.afterWrite();
