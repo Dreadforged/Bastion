@@ -58,7 +58,10 @@ mod tests {
 
     #[test]
     fn rejects_oversized_content() {
-        assert_eq!(pad(&vec![0; MAX_CONTENT + 1]), Err(CryptoError::MessageTooLarge));
+        assert_eq!(
+            pad(&vec![0; MAX_CONTENT + 1]),
+            Err(CryptoError::MessageTooLarge)
+        );
         assert!(pad(&vec![0; MAX_CONTENT]).is_ok());
     }
 
