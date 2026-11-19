@@ -1,5 +1,5 @@
 import type { schemas } from "@bastion/shared";
-import type { AuthDeps } from "./deps.js";
+import { closeSockets, type AuthDeps } from "./deps.js";
 import { AuthError } from "./errors.js";
 import type { Principal } from "./sessions.js";
 
@@ -20,11 +20,19 @@ export async function listDevices(deps: AuthDeps, principal: Principal): Promise
 
 /** Removes the passkey and signs the device out everywhere (sessions cascade). */
 export async function revokeDevice(deps: AuthDeps, principal: Principal, deviceId: string): Promise<void> {
+  const { results: sessions } = await deps.db
+    .prepare("SELECT id FROM sessions WHERE device_id = ? AND user_id = ?")
+    .bind(deviceId, principal.userId)
+    .all<{ id: string }>();
   const result = await deps.db
     .prepare("DELETE FROM devices WHERE id = ? AND user_id = ?")
     .bind(deviceId, principal.userId)
     .run();
   if (result.meta.changes !== 1) throw new AuthError(404, "not_found");
+  await closeSockets(
+    deps,
+    sessions.map((s) => ({ userId: principal.userId, sessionId: s.id })),
+  );
 }
 
 /** Drops expired enrollments, challenges, sessions and rate limit windows. */
