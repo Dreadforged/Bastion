@@ -9,7 +9,8 @@
     "deploy:staging": "wrangler deploy --env staging",
     "deploy:production": "wrangler deploy --env production",
     "typecheck": "tsc -p tsconfig.json && tsc -p test/tsconfig.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "load": "node test/load/run.mjs"
   },
   "dependencies": {
     "@bastion/durable": "0.0.0",
