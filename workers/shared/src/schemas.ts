@@ -71,3 +71,5 @@ export const ServerFrame = z.discriminatedUnion("type", [
   z.object({ type: z.literal("error"), code: z.string(), message: z.string() }),
 ]);
 export type ServerFrame = z.infer<typeof ServerFrame>;
+
+export * from "./auth.js";
