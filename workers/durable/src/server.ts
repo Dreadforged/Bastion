@@ -6,6 +6,12 @@ import type { Reply } from "./server/ops.js";
 import { SERVER_MIGRATIONS } from "./server/schema.js";
 import { fromDurableStorage, migrate } from "./storage.js";
 
+/** Retention in ms from the optional env value; a bad or missing value means the 90 day default. */
+function retentionMs(days: string | undefined): number {
+  const n = Number(days);
+  return Number.isInteger(n) && n >= 1 && n <= 3650 ? n * 86_400_000 : 90 * 86_400_000;
+}
+
 /**
  * One per community server, addressed by `idFromName(serverId)`.
  * Authoritative for membership, roles, channels, overrides, messages and
@@ -25,7 +31,15 @@ export class Server extends DurableObject<DurableEnv> {
         const stub = env.USER_SESSION.get(env.USER_SESSION.idFromName(userId));
         await stub.receive(userId, events);
       },
+      retentionMs: () => retentionMs(env.MODERATION_RETENTION_DAYS),
     });
+  }
+
+  /** Keep or release a report so the retention sweep cannot delete it. Staff tooling only. */
+  async holdReport(reportId: string, held: boolean): Promise<boolean> {
+    const found = this.core.setReportHold(reportId, held);
+    await this.afterWrite();
+    return found;
   }
 
   async init(serverId: string, ownerId: string, name: string): Promise<Reply> {

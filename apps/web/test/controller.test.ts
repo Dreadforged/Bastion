@@ -23,7 +23,7 @@ function controllerFor(userId: string, everyone: bigint, overrides: { allow: big
         roles: [{ id: S, serverId: S, name: "@everyone", permissions: everyone.toString(), position: 0 }],
         channels: [
           {
-            id: C, serverId: S, name: "general", kind: "text", position: 0, slowModeSeconds: 0,
+            id: C, serverId: S, name: "general", kind: "text", position: 0, slowModeSeconds: 0, ageRestricted: false,
             overrides: overrides ? [{ kind: "role", targetId: S, allow: overrides.allow.toString(), deny: overrides.deny.toString() }] : [],
           },
         ],

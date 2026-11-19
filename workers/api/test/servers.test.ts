@@ -3,6 +3,7 @@ import type { Server, UserSession } from "@bastion/durable";
 import { beforeEach, describe, expect, it } from "vitest";
 import { World } from "../../durable/test/world.js";
 import { hashToken, newToken } from "../src/auth/crypto.js";
+import { FlagReader, setFlag } from "../src/safety/flags.js";
 import { cleanupInviteCodes, handleServers } from "../src/servers/routes.js";
 import { createTestD1 } from "./d1.js";
 
@@ -76,11 +77,13 @@ async function call(method: string, path: string, opts: { token?: string; body?:
   const revokeConversationAccess = async (conversationId: string, userId: string) => {
     revoked.push({ conversationId, userId });
   };
-  const res = await handleServers(request, { db, servers, sessions, now: () => world.now, userLimit, revokeConversationAccess });
+  const res = await handleServers(request, { db, servers, sessions, now: () => world.now, userLimit, revokeConversationAccess, flags: testFlags });
   if (!res) throw new Error(`unrouted ${method} ${path}`);
   const text = await res.text();
   return { status: res.status, body: text ? JSON.parse(text) : null, headers: res.headers };
 }
+
+let testFlags: FlagReader | undefined;
 
 async function inviteIndex(code: string) {
   return db.prepare("SELECT server_id FROM invite_codes WHERE code = ?").bind(code).first<{ server_id: string }>();
@@ -275,6 +278,30 @@ describe("moderation routes", () => {
     const { owner, serverId, general } = await setup();
     const res = await call("PATCH", `/servers/${serverId}/channels/${general}`, { token: owner.token, body: { slowModeSeconds: 30 } });
     expect(res.body.slowModeSeconds).toBe(30);
+  });
+
+  it("only allows age restricted channels where the region flag allows them", async () => {
+    const { owner, serverId, general } = await setup();
+    const label = (channelId: string) => call("PATCH", `/servers/${serverId}/channels/${channelId}`, { token: owner.token, body: { ageRestricted: true } });
+    const create = () => call("POST", `/servers/${serverId}/channels`, { token: owner.token, body: { name: "adults", ageRestricted: true } });
+
+    // No flag reader, or the built in default: refused.
+    expect(await label(general)).toMatchObject({ status: 403, body: { error: "age_restricted_channels_disabled" } });
+    testFlags = new FlagReader(db, () => world.now);
+    try {
+      expect(await create()).toMatchObject({ status: 403, body: { error: "age_restricted_channels_disabled" } });
+      // Unlabelled channels are never affected.
+      expect((await call("POST", `/servers/${serverId}/channels`, { token: owner.token, body: { name: "plain" } })).status).toBe(201);
+
+      await setFlag(db, "staff-1", "age", "default", { enabled: true, config: { ageRestrictedChannels: true } }, world.now);
+      testFlags.invalidate();
+      const made = await create();
+      expect(made.status).toBe(201);
+      expect(made.body.ageRestricted).toBe(true);
+      expect((await label(general)).body.ageRestricted).toBe(true);
+    } finally {
+      testFlags = undefined;
+    }
   });
 
   it("deletes a server and drops its invite codes from the index", async () => {

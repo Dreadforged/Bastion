@@ -5,6 +5,8 @@ import type { UserSession } from "./user-session.js";
 export interface DurableEnv {
   USER_SESSION: DurableObjectNamespace<UserSession>;
   SERVER: DurableObjectNamespace<Server>;
+  /** Days to keep closed reports and audit entries. Optional; 90 when unset. */
+  MODERATION_RETENTION_DAYS?: string;
 }
 
 /**

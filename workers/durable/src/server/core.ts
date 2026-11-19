@@ -65,6 +65,8 @@ export interface ServerDeps {
   now: () => number;
   /** Hand events to a user's UserSession. Throws if it could not. */
   deliver: (userId: string, events: GatewayEvent[]) => Promise<void>;
+  /** How long closed reports and audit entries are kept. Defaults to the moderation limit. */
+  retentionMs?: () => number;
 }
 
 class Fail extends Error {
@@ -93,6 +95,7 @@ interface ChannelRow {
   kind: "text" | "voice";
   position: number;
   slow_mode_seconds: number;
+  age_restricted: number;
 }
 
 interface OverrideRow {
@@ -135,6 +138,7 @@ interface AuditInput {
   targetId?: string | null;
   channelId?: string | null;
   reason?: string | undefined;
+  reasonCode?: s.ReasonCode | undefined;
   data?: Record<string, string | number | boolean | null>;
 }
 
@@ -156,6 +160,7 @@ interface AuditRow {
   target_id: string | null;
   channel_id: string | null;
   reason: string | null;
+  reason_code: string | null;
   data: string;
   created_at: number;
 }
@@ -291,7 +296,7 @@ export class ServerCore {
     }
     const channels = new Map<string, ChannelRow>();
     for (const c of this.sql.exec<ChannelRow>(
-      "SELECT id, name, kind, position, slow_mode_seconds FROM channels ORDER BY position, id",
+      "SELECT id, name, kind, position, slow_mode_seconds, age_restricted FROM channels ORDER BY position, id",
     ).toArray()) {
       channels.set(c.id, c);
     }
@@ -407,6 +412,7 @@ export class ServerCore {
         deny: o.deny,
       })),
       slowModeSeconds: c.slow_mode_seconds,
+      ageRestricted: c.age_restricted === 1,
     };
   }
 
@@ -843,18 +849,19 @@ export class ServerCore {
         const id = newId();
         const position = op.body.position ?? Math.max(-1, ...[...snap.channels.values()].map((c) => c.position)) + 1;
         this.sql.exec(
-          "INSERT INTO channels (id, name, kind, position, slow_mode_seconds, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+          "INSERT INTO channels (id, name, kind, position, slow_mode_seconds, age_restricted, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
           id,
           op.body.name,
           op.body.kind,
           position,
           op.body.slowModeSeconds,
+          op.body.ageRestricted ? 1 : 0,
           now,
         );
         const after = this.load();
         const payload = this.channelPayload(after, id);
         this.emit({ users: this.viewers(after, id), event: event("CHANNEL_CREATE", payload), channelId: id });
-        this.audit(after, userId, "channel.create", { targetId: id, channelId: id, data: { name: op.body.name, kind: op.body.kind } });
+        this.audit(after, userId, "channel.create", { targetId: id, channelId: id, data: { name: op.body.name, kind: op.body.kind, ageRestricted: op.body.ageRestricted } });
         return { status: 201, body: payload };
       }
       case "channel.update": {
@@ -862,10 +869,11 @@ export class ServerCore {
         const c = snap.channels.get(op.channelId)!;
         const slowMode = op.body.slowModeSeconds ?? c.slow_mode_seconds;
         this.sql.exec(
-          "UPDATE channels SET name = ?, position = ?, slow_mode_seconds = ? WHERE id = ?",
+          "UPDATE channels SET name = ?, position = ?, slow_mode_seconds = ?, age_restricted = ? WHERE id = ?",
           op.body.name ?? c.name,
           op.body.position ?? c.position,
           slowMode,
+          op.body.ageRestricted === undefined ? c.age_restricted : op.body.ageRestricted ? 1 : 0,
           op.channelId,
         );
         if (slowMode === 0) this.sql.exec("DELETE FROM slow_mode WHERE channel_id = ?", op.channelId);
@@ -875,6 +883,7 @@ export class ServerCore {
         const changes: Record<string, string | number> = {};
         if (op.body.name !== undefined && op.body.name !== c.name) changes.name = op.body.name;
         if (op.body.position !== undefined && op.body.position !== c.position) changes.position = op.body.position;
+        if (op.body.ageRestricted !== undefined && op.body.ageRestricted !== (c.age_restricted === 1)) changes.ageRestricted = op.body.ageRestricted ? 1 : 0;
         if (Object.keys(changes).length > 0) {
           this.audit(after, userId, "channel.update", { targetId: op.channelId, channelId: op.channelId, data: changes });
         }
@@ -1055,7 +1064,7 @@ export class ServerCore {
         this.requireModeration(snap, userId, op.userId, P.KICK);
         if (!snap.members.has(op.userId)) fail(404, "unknown_member");
         this.removeMember(snap, op.userId);
-        this.audit(snap, userId, "member.kick", { targetId: op.userId, reason: op.body.reason });
+        this.audit(snap, userId, "member.kick", { targetId: op.userId, reason: op.body.reason, reasonCode: op.body.reasonCode });
         return { status: 204, body: null };
       }
       case "member.timeout": {
@@ -1074,7 +1083,7 @@ export class ServerCore {
         const after = this.load();
         const member = this.memberPayload(after, op.userId);
         this.emit({ users: after.members.keys(), event: event("MEMBER_UPDATE", member) });
-        this.audit(after, userId, "member.timeout", { targetId: op.userId, reason: op.body.reason, data: { until } });
+        this.audit(after, userId, "member.timeout", { targetId: op.userId, reason: op.body.reason, reasonCode: op.body.reasonCode, data: { until } });
         return { status: 200, body: member };
       }
       case "member.timeout.remove": {
@@ -1086,7 +1095,7 @@ export class ServerCore {
         const member = this.memberPayload(after, op.userId);
         if (active) {
           this.emit({ users: after.members.keys(), event: event("MEMBER_UPDATE", member) });
-          this.audit(after, userId, "member.timeout.remove", { targetId: op.userId, reason: op.body.reason });
+          this.audit(after, userId, "member.timeout.remove", { targetId: op.userId, reason: op.body.reason, reasonCode: op.body.reasonCode });
         }
         return { status: 200, body: member };
       }
@@ -1104,14 +1113,14 @@ export class ServerCore {
         const wasMember = snap.members.has(op.userId);
         if (wasMember) this.removeMember(snap, op.userId);
         if (added > 0 || wasMember || deleted > 0) {
-          this.audit(snap, userId, "member.ban", { targetId: op.userId, reason: op.body.reason, data: { deletedMessages: deleted } });
+          this.audit(snap, userId, "member.ban", { targetId: op.userId, reason: op.body.reason, reasonCode: op.body.reasonCode, data: { deletedMessages: deleted } });
         }
         return { status: 204, body: null };
       }
       case "ban.delete": {
         this.requireBase(snap, userId, P.BAN);
         const removed = this.sql.exec("DELETE FROM bans WHERE user_id = ?", op.userId).rowsWritten;
-        if (removed > 0) this.audit(snap, userId, "member.unban", { targetId: op.userId, reason: op.body.reason });
+        if (removed > 0) this.audit(snap, userId, "member.unban", { targetId: op.userId, reason: op.body.reason, reasonCode: op.body.reasonCode });
         return { status: 204, body: null };
       }
       case "bans.list": {
@@ -1242,7 +1251,7 @@ export class ServerCore {
         if (op.userId === userId) fail(400, "cannot_moderate_self");
         this.requireModeration(snap, userId, op.userId, P.MUTE_MEMBERS);
         const row = this.voiceRow(op.userId) ?? fail(404, "not_in_voice");
-        const audit = { targetId: op.userId, channelId: row.channel_id, reason: op.body.reason };
+        const audit = { targetId: op.userId, channelId: row.channel_id, reason: op.body.reason, reasonCode: op.body.reasonCode };
         if (op.type === "voice.disconnect") {
           this.dropVoice(snap, row);
           this.audit(snap, userId, "voice.disconnect", audit);
@@ -1339,6 +1348,7 @@ export class ServerCore {
             targetId: row.id,
             channelId: row.channel_id,
             reason: op.body.reason,
+            reasonCode: op.body.reasonCode,
             data: { status: op.body.status },
           });
         }
@@ -1350,7 +1360,7 @@ export class ServerCore {
         this.requireBase(snap, userId, P.VIEW_AUDIT_LOG);
         const rows = this.sql
           .exec<AuditRow>(
-            `SELECT id, actor_id, action, target_id, channel_id, reason, data, created_at FROM audit_log
+            `SELECT id, actor_id, action, target_id, channel_id, reason, reason_code, data, created_at FROM audit_log
              WHERE id < ? AND (? IS NULL OR action = ?) AND (? IS NULL OR actor_id = ?)
              ORDER BY id DESC LIMIT ?`,
             op.query.before ?? "~",
@@ -1680,9 +1690,24 @@ export class ServerCore {
    * Record a moderator or admin action and tell members who can read the log.
    * Entries older than the retention period are dropped as new ones arrive.
    */
+  private retentionMs(): number {
+    return this.deps.retentionMs?.() ?? ML.retentionMs;
+  }
+
+  /**
+   * Keep (or release) a report so the retention sweep cannot delete it. Called
+   * by platform staff tooling through the Server object, never by a member.
+   */
+  setReportHold(reportId: string, held: boolean): boolean {
+    const before = this.sql.exec("SELECT 1 FROM reports WHERE id = ?", reportId).toArray().length;
+    if (before === 0) return false;
+    this.sql.exec("UPDATE reports SET legal_hold = ? WHERE id = ?", held ? 1 : 0, reportId);
+    return true;
+  }
+
   private audit(snap: Snapshot, actorId: string, action: schemas.AuditAction, input: AuditInput = {}): void {
     const now = this.deps.now();
-    this.sql.exec("DELETE FROM audit_log WHERE created_at < ?", now - ML.retentionMs);
+    this.sql.exec("DELETE FROM audit_log WHERE created_at < ?", now - this.retentionMs());
     const row: AuditRow = {
       id: newId(),
       actor_id: actorId,
@@ -1690,17 +1715,19 @@ export class ServerCore {
       target_id: input.targetId ?? null,
       channel_id: input.channelId ?? null,
       reason: input.reason ?? null,
+      reason_code: input.reasonCode ?? null,
       data: JSON.stringify(input.data ?? {}),
       created_at: now,
     };
     this.sql.exec(
-      "INSERT INTO audit_log (id, actor_id, action, target_id, channel_id, reason, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO audit_log (id, actor_id, action, target_id, channel_id, reason, reason_code, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       row.id,
       row.actor_id,
       row.action,
       row.target_id,
       row.channel_id,
       row.reason,
+      row.reason_code,
       row.data,
       row.created_at,
     );
@@ -1717,6 +1744,7 @@ export class ServerCore {
       targetId: row.target_id,
       channelId: row.channel_id,
       reason: row.reason,
+      reasonCode: (row.reason_code as s.ReasonCode | null) ?? null,
       data: JSON.parse(row.data) as schemas.AuditLogEntry["data"],
       createdAt: row.created_at,
     };
@@ -1786,8 +1814,8 @@ export class ServerCore {
       if (dupe > 0) fail(409, "already_reported");
     }
     this.sql.exec(
-      "DELETE FROM reports WHERE status != 'open' AND updated_at < ?",
-      now - ML.retentionMs,
+      "DELETE FROM reports WHERE status != 'open' AND legal_hold = 0 AND updated_at < ?",
+      now - this.retentionMs(),
     );
     const id = newId();
     this.sql.exec(

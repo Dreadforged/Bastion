@@ -80,6 +80,8 @@ export const Channel = z.object({
   overrides: z.array(ChannelOverride),
   /** Seconds a member must wait between messages; 0 is off. */
   slowModeSeconds: z.number().int().nonnegative(),
+  /** Labelled for adults only. Today this is a label; where the region allows such channels, clients hide them from under-18s. */
+  ageRestricted: z.boolean(),
 });
 export type Channel = z.infer<typeof Channel>;
 
@@ -142,6 +144,7 @@ export const CreateChannelRequest = z.object({
   kind: z.enum(["text", "voice"]).default("text"),
   position: z.number().int().nonnegative().max(10_000).optional(),
   slowModeSeconds: SlowModeSeconds.default(0),
+  ageRestricted: z.boolean().default(false),
 });
 
 export const UpdateChannelRequest = z
@@ -149,6 +152,7 @@ export const UpdateChannelRequest = z
     name: Name.optional(),
     position: z.number().int().nonnegative().max(10_000).optional(),
     slowModeSeconds: SlowModeSeconds.optional(),
+    ageRestricted: z.boolean().optional(),
   })
   .refine((v) => Object.keys(v).length > 0, "nothing to update");
 

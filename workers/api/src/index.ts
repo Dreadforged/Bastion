@@ -104,6 +104,7 @@ export default {
       servers: env.SERVER,
       sessions: env.USER_SESSION,
       now: Date.now,
+      flags: flagsFor(env),
       userLimit: env.API_RATE_LIMIT,
       revokeConversationAccess: (conversationId, userId) => conversation(conversationId).revoke([userId]),
       voice: voiceDeps(env),

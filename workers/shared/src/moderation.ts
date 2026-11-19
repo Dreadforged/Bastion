@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { Id } from "./ids.js";
+import { ReasonCode } from "./safety.js";
 
 /**
  * Moderation: reports, timeouts, kicks, bans, slow mode and the audit log.
@@ -31,6 +32,9 @@ export const MODERATION_LIMITS = {
 /** Free text a moderator gives for an action. Shown in the audit log. */
 export const ModerationReason = z.string().trim().min(1).max(MODERATION_LIMITS.maxReasonChars);
 
+/** A fixed reason, kept next to the free text so actions can be counted and explained. */
+export const ModerationReasonCode = ReasonCode;
+
 const Page = {
   before: Id.optional(),
   limit: z.coerce.number().int().min(1).max(MODERATION_LIMITS.maxPage).default(50),
@@ -38,7 +42,7 @@ const Page = {
 
 // ------------------------------------------------------------------ reports
 
-export const ReportCategory = z.enum(["spam", "harassment", "hate", "sexual", "violence", "self_harm", "illegal", "other"]);
+export const ReportCategory = z.enum(["spam", "harassment", "hate", "sexual", "violence", "self_harm", "illegal", "underage", "other"]);
 export type ReportCategory = z.infer<typeof ReportCategory>;
 
 export const ReportStatus = z.enum(["open", "resolved", "dismissed"]);
@@ -83,6 +87,7 @@ export const CreateReportRequest = z.object({
 export const UpdateReportRequest = z.object({
   status: ReportStatus,
   reason: ModerationReason.optional(),
+  reasonCode: ReasonCode.optional(),
 });
 
 export const ReportListQuery = z.object({ status: ReportStatus.optional(), ...Page });
@@ -92,13 +97,15 @@ export const ReportListQuery = z.object({ status: ReportStatus.optional(), ...Pa
 export const TimeoutRequest = z.object({
   seconds: z.number().int().min(1).max(MODERATION_LIMITS.maxTimeoutSeconds),
   reason: ModerationReason.optional(),
+  reasonCode: ReasonCode.optional(),
 });
 
 /** Optional body for kicks, unbans and removing a timeout. */
-export const ReasonRequest = z.object({ reason: ModerationReason.optional() });
+export const ReasonRequest = z.object({ reason: ModerationReason.optional(), reasonCode: ReasonCode.optional() });
 
 export const BanRequest = z.object({
   reason: ModerationReason.optional(),
+  reasonCode: ReasonCode.optional(),
   deleteMessageSeconds: z.number().int().min(0).max(MODERATION_LIMITS.maxBanDeleteSeconds).default(0),
 });
 
@@ -150,6 +157,8 @@ export const AuditLogEntry = z.object({
   targetId: z.string().max(64).nullable(),
   channelId: Id.nullable(),
   reason: z.string().nullable(),
+  /** The fixed reason code, when the moderator gave one. */
+  reasonCode: ReasonCode.nullable(),
   /** Small action-specific details, such as a timeout's end. */
   data: z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()])),
   createdAt: z.number().int(),
