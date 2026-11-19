@@ -44,6 +44,25 @@ message. Only ciphertext passes between them, and nothing leaves your browser.</
       const got = bob.receive(gid, cipher);
       log(`bob read: "${dec.decode(got.content)}" from ${dec.decode(got.sender)}`);
       log(`safety code:\n${safetyCode(enc.encode("alice"), alice.identityKey(), enc.encode("bob"), bob.identityKey())}`);
+
+      // Reload: save Bob, drop him, restore from the bytes. A real app
+      // must encrypt this blob (it is secret key material) before storing it.
+      const saved = bob.saveState();
+      const bob2 = WasmClient.loadState(saved);
+      const c2 = alice.encrypt(gid, enc.encode("after reload"));
+      log(`bob after reload read: "${dec.decode(bob2.receive(gid, c2).content)}" (state ${saved.length} bytes)`);
+
+      // Rollback: a commit the server rejects is dropped.
+      const epoch = alice.epoch(gid);
+      alice.updateKeys(gid);
+      alice.commitRejected(gid);
+      log(`rejected commit rolled back, epoch still ${alice.epoch(gid)} (was ${epoch})`);
+
+      // Removal: Bob is removed and learns it from the commit.
+      const rm = alice.removeMembers(gid, [enc.encode("bob/1")]);
+      alice.commitAccepted(gid);
+      log(`bob sees: ${bob2.receive(gid, rm.commit).kind}, still in group: ${bob2.inGroup(gid)}`);
+      log(`members left: ${alice.members(gid).map((m) => dec.decode(m)).join(", ")}`);
     } catch (e) {
       log("error: " + e.message);
     }

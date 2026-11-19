@@ -43,6 +43,27 @@ pub enum Incoming {
     Removed,
 }
 
+const STATE_MAGIC: &[u8] = b"BSTN\x01";
+
+fn put(out: &mut Vec<u8>, data: &[u8]) {
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    out.extend_from_slice(data);
+}
+
+fn take<'a>(r: &mut &'a [u8], n: usize) -> Result<&'a [u8], CryptoError> {
+    if r.len() < n {
+        return Err(CryptoError::Malformed);
+    }
+    let (head, tail) = r.split_at(n);
+    *r = tail;
+    Ok(head)
+}
+
+fn get<'a>(r: &mut &'a [u8]) -> Result<&'a [u8], CryptoError> {
+    let n = u32::from_be_bytes(take(r, 4)?.try_into().unwrap()) as usize;
+    take(r, n)
+}
+
 fn mls_err(e: impl core::fmt::Debug) -> CryptoError {
     CryptoError::Mls(format!("{e:?}"))
 }
@@ -286,7 +307,9 @@ impl Client {
                     .merge_staged_commit(provider, *staged)
                     .map_err(mls_err)?;
                 if removed {
-                    self.groups.remove(group_id);
+                    if let Some(mut gone) = self.groups.remove(group_id) {
+                        gone.delete(provider.storage()).map_err(mls_err)?;
+                    }
                     return Ok(Incoming::Removed);
                 }
                 Ok(Incoming::Commit {
@@ -310,6 +333,78 @@ impl Client {
             .members()
             .map(|m| m.credential.serialized_content().to_vec())
             .collect())
+    }
+
+    /// Serializes the whole device (identity, signing key, every group) into
+    /// one blob. This is secret key material in the clear: encrypt it before
+    /// it touches disk. A pending commit is included.
+    pub fn save_state(&self) -> Result<Vec<u8>, CryptoError> {
+        let mut out = Vec::new();
+        out.extend_from_slice(STATE_MAGIC);
+        put(&mut out, self.credential.credential.serialized_content());
+        put(&mut out, self.signer.public());
+        out.extend_from_slice(&(self.groups.len() as u32).to_be_bytes());
+        for id in self.groups.keys() {
+            put(&mut out, id);
+        }
+        let values = self.provider.storage().values.read().unwrap();
+        out.extend_from_slice(&(values.len() as u32).to_be_bytes());
+        for (k, v) in values.iter() {
+            put(&mut out, k);
+            put(&mut out, v);
+        }
+        drop(values);
+        Ok(out)
+    }
+
+    /// Rebuilds a device from [`Client::save_state`] output.
+    pub fn load_state(bytes: &[u8]) -> Result<Self, CryptoError> {
+        let mut r = bytes;
+        if take(&mut r, STATE_MAGIC.len())? != STATE_MAGIC {
+            return Err(CryptoError::Malformed);
+        }
+        let identity = get(&mut r)?.to_vec();
+        let public = get(&mut r)?.to_vec();
+        let count = u32::from_be_bytes(take(&mut r, 4)?.try_into().unwrap());
+        let mut ids = Vec::new();
+        for _ in 0..count {
+            ids.push(get(&mut r)?.to_vec());
+        }
+        let n = u32::from_be_bytes(take(&mut r, 4)?.try_into().unwrap());
+        let mut map = HashMap::new();
+        for _ in 0..n {
+            let k = get(&mut r)?.to_vec();
+            let v = get(&mut r)?.to_vec();
+            map.insert(k, v);
+        }
+        if !r.is_empty() {
+            return Err(CryptoError::Malformed);
+        }
+        let provider = OpenMlsRustCrypto::default();
+        *provider.storage().values.write().unwrap() = map;
+        let signer = SignatureKeyPair::read(
+            provider.storage(),
+            &public,
+            CIPHERSUITE.signature_algorithm(),
+        )
+        .ok_or(CryptoError::Malformed)?;
+        let credential = CredentialWithKey {
+            credential: BasicCredential::new(identity).into(),
+            signature_key: signer.to_public_vec().into(),
+        };
+        let mut groups = HashMap::new();
+        for id in ids {
+            let group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&id))
+                .map_err(mls_err)?
+                .ok_or(CryptoError::Malformed)?;
+            groups.insert(id, group);
+        }
+        Ok(Self {
+            provider,
+            signer,
+            credential,
+            groups,
+        })
     }
 
     /// Whether this device holds state for the group.
