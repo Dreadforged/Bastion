@@ -1,10 +1,10 @@
-import { Id } from "@bastion/shared";
 import { cleanupExpired } from "./auth/devices.js";
 import { createEmailSender } from "./auth/email.js";
 import { simpleWebAuthn } from "./auth/passkeys.js";
 import { handleAuth, json } from "./auth/routes.js";
+import { handleConversations } from "./conversations/routes.js";
 import { cleanupInviteCodes, handleServers } from "./servers/routes.js";
-import type { Server, UserSession } from "@bastion/durable";
+import type { Conversation, Server, UserSession } from "@bastion/durable";
 
 // Durable Object classes must be exported from the Worker entry.
 export { Conversation, Server, UserSession } from "@bastion/durable";
@@ -15,7 +15,7 @@ export interface Env {
   FILES: R2Bucket;
   USER_SESSION: DurableObjectNamespace<UserSession>;
   SERVER: DurableObjectNamespace<Server>;
-  CONVERSATION: DurableObjectNamespace;
+  CONVERSATION: DurableObjectNamespace<Conversation>;
   /** WebAuthn relying party id, e.g. the app domain. */
   RP_ID: string;
   RP_NAME: string;
@@ -58,15 +58,13 @@ export default {
     });
     if (servers) return servers;
 
-    // GET /conversations/:id/socket upgrades into the Conversation object.
-    const match = url.pathname.match(/^\/conversations\/([^/]+)\/socket$/);
-    if (match) {
-      const parsed = Id.safeParse(match[1]);
-      if (!parsed.success) return json({ error: "invalid id" }, 400);
-      // TODO: authenticate and check VIEW_CHANNEL before upgrading.
-      const stub = env.CONVERSATION.get(env.CONVERSATION.idFromName(parsed.data));
-      return stub.fetch(request);
-    }
+    const conversations = await handleConversations(request, {
+      db: env.DB,
+      conversations: env.CONVERSATION,
+      now: Date.now,
+      userLimit: env.API_RATE_LIMIT,
+    });
+    if (conversations) return conversations;
 
     return json({ error: "not found" }, 404);
   },
