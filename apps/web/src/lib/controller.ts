@@ -5,6 +5,7 @@ import { AuthClient } from "./auth.js";
 import { decodeBundle, E2ee, type DecryptedMessage, type MlsClient, type PersistedMeta } from "./e2ee.js";
 import { Gateway, type GatewayOptions, type GatewayStatus } from "./gateway.js";
 import { Api, ApiError, newIdempotencyKey } from "./http.js";
+import { buildChatExport, type ChatExport } from "./privacy.js";
 import { applyEvent, applyReady, emptyState, mergeHistory, type ChatState } from "./store.js";
 import type { StateVault } from "./vault.js";
 
@@ -395,6 +396,27 @@ export class Controller {
 
   sendTyping(serverId: string, channelId: string) {
     return this.o.api.post(`/servers/${serverId}/channels/${channelId}/typing`).catch(() => undefined);
+  }
+
+  // ---------------------------------------------------------------- privacy and data
+
+  getPrivacy() {
+    return this.o.api.get<schemas.PrivacySettings>("/account/privacy");
+  }
+
+  updatePrivacy(change: schemas.UpdatePrivacyRequest) {
+    return this.o.api.put<schemas.PrivacySettings>("/account/privacy", change);
+  }
+
+  /** What the server holds about this account. */
+  accountExport() {
+    return this.o.api.get<schemas.AccountExport>("/account/export");
+  }
+
+  /** The readable history this device holds. Never leaves the device. */
+  chatExport(): ChatExport {
+    const s = this.state;
+    return buildChatExport({ userId: s.chat.userId, dms: s.dms, channelMessages: s.chat.messages, plaintext: s.plaintext }, Date.now());
   }
 
   // ---------------------------------------------------------------- direct messages
