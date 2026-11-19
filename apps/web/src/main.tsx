@@ -4,6 +4,7 @@ import { App } from "./App.js";
 import { AuthClient } from "./lib/auth.js";
 import { Controller } from "./lib/controller.js";
 import { Api, LocalTokenStore } from "./lib/http.js";
+import { IdbStateVault } from "./lib/vault.js";
 import { createMlsClient } from "./lib/wasm.js";
 import "./ui/styles.css";
 
@@ -16,7 +17,7 @@ const wsBase = apiBase.startsWith("http") ? apiBase.replace(/^http/, "ws") : `${
 
 const api = new Api({ baseUrl: apiBase, store: new LocalTokenStore(localStorage), onSignedOut: () => controller.signOut() });
 const auth = new AuthClient(api);
-const controller = new Controller({ api, auth, createMls: createMlsClient, gatewayUrl: `${wsBase}/gateway` });
+const controller = new Controller({ api, auth, createMls: createMlsClient, vault: new IdbStateVault(), gatewayUrl: `${wsBase}/gateway` });
 void controller.start();
 
 createRoot(root).render(

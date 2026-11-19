@@ -1,9 +1,10 @@
 import { newId, Permission, computePermissions, type EventName, type ReadyPayload, type schemas } from "@bastion/shared";
 import { AuthClient } from "./auth.js";
-import { E2ee, type DecryptedMessage, type MlsClient } from "./e2ee.js";
+import { decodeBundle, E2ee, type DecryptedMessage, type MlsClient, type PersistedMeta } from "./e2ee.js";
 import { Gateway, type GatewayOptions, type GatewayStatus } from "./gateway.js";
-import { Api, newIdempotencyKey } from "./http.js";
+import { Api, ApiError, newIdempotencyKey } from "./http.js";
 import { applyEvent, applyReady, emptyState, mergeHistory, type ChatState } from "./store.js";
+import type { StateVault } from "./vault.js";
 
 export type Phase = "signed-out" | "connecting" | "ready";
 
@@ -27,8 +28,10 @@ export interface AppState {
 export interface ControllerOptions {
   api: Api;
   auth: AuthClient;
-  /** Builds this device's MLS client once the user and device ids are known. */
-  createMls: (userId: string, deviceId: string) => MlsClient | Promise<MlsClient>;
+  /** Builds this device's MLS client once the user and device ids are known; `saved` is its stored state, if any. */
+  createMls: (userId: string, deviceId: string, saved: Uint8Array | null) => MlsClient | Promise<MlsClient>;
+  /** Encrypted storage for MLS state. Without it, state lives in memory only. */
+  vault?: StateVault;
   gatewayUrl: string;
   createSocket?: GatewayOptions["createSocket"];
 }
@@ -105,7 +108,7 @@ export class Controller {
         onStatus: (gateway) => {
           this.set({ gateway });
           // The server ended our session (sign-out elsewhere, device revoked).
-          if (gateway === "ended" && this.state.phase !== "signed-out") this.reset();
+          if (gateway === "ended" && this.state.phase !== "signed-out") void this.reset();
         },
       },
     );
@@ -115,8 +118,38 @@ export class Controller {
   private async onReady(ready: ReadyPayload) {
     this.set((s) => ({ phase: "ready", chat: applyReady(s.chat, ready) }));
     if (!this.e2ee && this.deviceId) {
-      const mls = await this.o.createMls(ready.userId, this.deviceId);
-      this.e2ee = new E2ee({ api: this.o.api, userId: ready.userId, deviceId: this.deviceId, mls });
+      const deviceId = this.deviceId;
+      const vaultId = `${ready.userId}/${deviceId}`;
+      const vault = this.o.vault;
+      let saved: { mls: Uint8Array; meta: PersistedMeta } | null = null;
+      if (vault) {
+        try {
+          const raw = await vault.load(vaultId);
+          saved = raw ? decodeBundle(raw) : null;
+        } catch {
+          // Unreadable or from another version: start this device's groups afresh.
+          saved = null;
+        }
+      }
+      let mls: MlsClient;
+      try {
+        mls = await this.o.createMls(ready.userId, deviceId, saved?.mls ?? null);
+      } catch (err) {
+        if (!saved) throw err;
+        saved = null;
+        mls = await this.o.createMls(ready.userId, deviceId, null);
+      }
+      // Signed out while loading: do not bring anything back.
+      if (this.state.phase === "signed-out") return;
+      this.e2ee = new E2ee({
+        api: this.o.api,
+        userId: ready.userId,
+        deviceId,
+        mls,
+        ...(saved ? { restored: saved.meta } : {}),
+        ...(vault ? { persist: (bundle: Uint8Array) => vault.save(vaultId, bundle) } : {}),
+        onPersistError: () => this.set({ error: "could_not_save_encryption_state" }),
+      });
       await this.guard(() => this.e2ee!.publishKeys());
     }
   }
@@ -135,15 +168,20 @@ export class Controller {
   async signOut(): Promise<void> {
     this.gateway?.close();
     await this.o.auth.signOut().catch(() => undefined);
-    this.reset();
+    await this.reset();
   }
 
-  private reset() {
+  /** Back to signed-out: drop in-memory state and wipe the stored keys and group state. */
+  private async reset(): Promise<void> {
     this.gateway?.close();
     this.gateway = null;
+    const e2ee = this.e2ee;
     this.e2ee = null;
     this.deviceId = null;
     this.set({ phase: "signed-out", chat: emptyState, plaintext: {}, dms: {}, gateway: "idle" });
+    // Let queued saves land first, otherwise one could write state back after the wipe.
+    await e2ee?.close();
+    await this.o.vault?.clear().catch(() => undefined);
   }
 
   // ---------------------------------------------------------------- servers and channels
@@ -231,12 +269,26 @@ export class Controller {
     if (!body) return;
     await this.guard(async () => {
       if (!this.e2ee) throw new Error("encryption_not_ready");
-      const { ciphertext, epoch, payload } = this.e2ee.encryptForChannel(channelId, body);
-      const sent = await this.o.api.post<schemas.Message>(
-        `/servers/${serverId}/channels/${channelId}/messages`,
-        { ciphertext, epoch },
-        { idempotencyKey: newIdempotencyKey() },
-      );
+      const post = async () => {
+        const { ciphertext, epoch, payload } = await this.e2ee!.encryptForChannel(channelId, body);
+        const sent = await this.o.api.post<schemas.Message>(
+          `/servers/${serverId}/channels/${channelId}/messages`,
+          { ciphertext, epoch },
+          { idempotencyKey: newIdempotencyKey() },
+        );
+        return { sent, payload };
+      };
+      let result;
+      try {
+        result = await post();
+      } catch (err) {
+        // Someone lost access: remove them from the group (new keys), then try once more.
+        const convId = this.e2ee.channelConversation(channelId);
+        if (!(err instanceof ApiError) || err.code !== "rotation_required" || !convId) throw err;
+        await this.e2ee.removeRevoked(convId, (err.body ?? {}) as { userIds?: string[]; deviceIds?: string[] });
+        result = await post();
+      }
+      const { sent, payload } = result;
       this.e2ee.rememberSent(sent.id, payload);
       this.set((s) => ({
         chat: applyEvent(s.chat, "MESSAGE_CREATE", sent),
@@ -281,6 +333,28 @@ export class Controller {
         },
       },
     }));
+  }
+
+  /** Remove a person's devices from a conversation (new keys, so they cannot read what comes next). */
+  async removeMember(conversationId: string, userId: string): Promise<void> {
+    await this.guard(async () => {
+      if (!this.e2ee) throw new Error("encryption_not_ready");
+      try {
+        await this.e2ee.removeMember(conversationId, userId);
+      } catch (err) {
+        // The commit was rolled back; catch up with whatever won the epoch.
+        await this.e2ee.sync(conversationId).catch(() => undefined);
+        throw err;
+      }
+    });
+  }
+
+  /** Rotate this device's keys in a conversation. */
+  async rotateKeys(conversationId: string): Promise<void> {
+    await this.guard(async () => {
+      if (!this.e2ee) throw new Error("encryption_not_ready");
+      await this.e2ee.rotateKeys(conversationId);
+    });
   }
 
   async sendDm(conversationId: string, text: string): Promise<void> {
