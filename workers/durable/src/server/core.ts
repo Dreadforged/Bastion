@@ -26,8 +26,18 @@ export const DEFAULT_EVERYONE =
   P.VIEW_CHANNEL | P.SEND_MESSAGES | P.ATTACH_FILES | P.CONNECT_VOICE | P.SPEAK | P.CREATE_INVITE;
 
 const IDEMPOTENCY_TTL = 24 * 60 * 60 * 1000;
+/**
+ * Presence changes and member joins wait this long so a burst of them (a wave
+ * of reconnects, a raid of joins) reaches each member in one delivery.
+ */
+export const BATCH_WINDOW_MS = 1000;
 const MAX_DELIVERY_ATTEMPTS = 20;
-const DELIVERY_BATCH = 100;
+/** Recipients handled per flush pass, and rows read per recipient. */
+const FLUSH_USERS = 200;
+const FLUSH_ROWS_PER_USER = 2000;
+/** One delivery call carries at most this many events or bytes. */
+const DELIVERY_MAX_EVENTS = 1000;
+const DELIVERY_MAX_BYTES = 1024 * 1024;
 
 /** Per-user request limits: burst, then refill per second. */
 const RATE = {
@@ -112,6 +122,10 @@ interface Emit {
   memberOnly?: boolean;
   /** Recipient must still hold these, in `channelId` when set. */
   permission?: bigint;
+  /** Hold the event back this long so it can go out with others. */
+  delayMs?: number;
+  /** Replaces any unsent event with the same key. */
+  coalesceKey?: string;
 }
 
 interface AuditInput {
@@ -141,6 +155,35 @@ interface AuditRow {
   reason: string | null;
   data: string;
   created_at: number;
+}
+
+interface OutboxRow {
+  id: number;
+  user_id: string;
+  channel_id: string | null;
+  member_only: number;
+  permission: string | null;
+  event: string;
+  attempts: number;
+  ready_at: number;
+}
+
+/** Split one recipient's rows into delivery calls under the size caps. */
+function chunks(rows: OutboxRow[]): OutboxRow[][] {
+  const out: OutboxRow[][] = [];
+  let current: OutboxRow[] = [];
+  let bytes = 0;
+  for (const row of rows) {
+    if (current.length > 0 && (current.length >= DELIVERY_MAX_EVENTS || bytes + row.event.length > DELIVERY_MAX_BYTES)) {
+      out.push(current);
+      current = [];
+      bytes = 0;
+    }
+    current.push(row);
+    bytes += row.event.length;
+  }
+  if (current.length > 0) out.push(current);
+  return out;
 }
 
 function event<T extends EventName>(t: T, d: EventPayload<T>): GatewayEvent {
@@ -401,19 +444,26 @@ export class ServerCore {
 
   // ------------------------------------------------------------ outbox
 
-  private emit({ users, event: ev, channelId = null, memberOnly = true, permission }: Emit): void {
+  private emit({ users, event: ev, channelId = null, memberOnly = true, permission, delayMs = 0, coalesceKey }: Emit): void {
     const now = this.deps.now();
     const payload = JSON.stringify(ev);
     const perm = permission === undefined ? null : serializePermissions(permission);
+    // Held-back events wait for the end of the current window, not a window
+    // of their own, so everything emitted in the same window goes out together.
+    const readyAt = delayMs > 0 ? Math.floor(now / delayMs) * delayMs + delayMs : now;
+    if (coalesceKey !== undefined) this.sql.exec("DELETE FROM outbox WHERE coalesce_key = ?", coalesceKey);
     for (const user of users) {
       this.sql.exec(
-        "INSERT INTO outbox (user_id, channel_id, member_only, permission, event, next_at) VALUES (?, ?, ?, ?, ?, ?)",
+        `INSERT INTO outbox (user_id, channel_id, member_only, permission, event, next_at, ready_at, coalesce_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         user,
         channelId,
         memberOnly ? 1 : 0,
         perm,
         payload,
         now,
+        readyAt,
+        coalesceKey ?? null,
       );
     }
   }
@@ -486,31 +536,48 @@ export class ServerCore {
     return this.nextRetry();
   }
 
+  /** When the next row is due, either after backoff or at the end of its batch window. */
   private nextRetry(): number | null {
-    const row = this.sql.exec<{ next_at: number | null }>("SELECT MIN(next_at) AS next_at FROM outbox").toArray()[0];
+    const row = this.sql.exec<{ next_at: number | null }>("SELECT MIN(MAX(next_at, ready_at)) AS next_at FROM outbox").toArray()[0];
     return row?.next_at ?? null;
   }
 
   private async flushOnce(): Promise<boolean> {
     const now = this.deps.now();
-    // A user in backoff keeps all their events back so order is preserved.
-    const rows = this.sql
-      .exec<{
-        id: number;
-        user_id: string;
-        channel_id: string | null;
-        member_only: number;
-        permission: string | null;
-        event: string;
-        attempts: number;
-      }>(
-        `SELECT id, user_id, channel_id, member_only, permission, event, attempts FROM outbox
-         WHERE user_id NOT IN (SELECT user_id FROM outbox WHERE next_at > ?)
-         ORDER BY id LIMIT 1000`,
+    // Recipients with something due. A user in backoff keeps all their events
+    // back so order is preserved.
+    const users = this.sql
+      .exec<{ user_id: string }>(
+        `SELECT DISTINCT user_id FROM outbox
+         WHERE ready_at <= ?1 AND user_id NOT IN (SELECT user_id FROM outbox WHERE next_at > ?1)
+         LIMIT ?2`,
         now,
+        FLUSH_USERS,
       )
-      .toArray();
-    if (rows.length === 0) return false;
+      .toArray()
+      .map((r) => r.user_id);
+    if (users.length === 0) return false;
+
+    // Read each recipient's rows on their own, so one pass sends a whole
+    // batch window to them in one call instead of slicing it across passes.
+    const rows: OutboxRow[] = [];
+    for (const user of users) {
+      const list = this.sql
+        .exec<OutboxRow>(
+          `SELECT id, user_id, channel_id, member_only, permission, event, attempts, ready_at FROM outbox
+           WHERE user_id = ? ORDER BY id LIMIT ?`,
+          user,
+          FLUSH_ROWS_PER_USER,
+        )
+        .toArray();
+      // Send everything up to the last due row: a held-back row goes early
+      // rather than arrive after an event that came later.
+      let last = -1;
+      list.forEach((row, i) => {
+        if (row.ready_at <= now) last = i;
+      });
+      rows.push(...list.slice(0, last + 1));
+    }
 
     const snap = this.serverRow() ? this.load() : null;
     const byUser = new Map<string, typeof rows>();
@@ -529,8 +596,7 @@ export class ServerCore {
     await Promise.all(
       [...byUser].map(async ([user, list]) => {
         try {
-          for (let i = 0; i < list.length; i += DELIVERY_BATCH) {
-            const batch = list.slice(i, i + DELIVERY_BATCH);
+          for (const batch of chunks(list)) {
             await this.deps.deliver(user, batch.map((r) => JSON.parse(r.event) as GatewayEvent));
             for (const r of batch) this.sql.exec("DELETE FROM outbox WHERE id = ?", r.id);
           }
@@ -609,6 +675,8 @@ export class ServerCore {
         this.emit({
           users: [...snap.members.keys()].filter((u) => u !== userId),
           event: event("PRESENCE_UPDATE", { serverId: snap.serverId, userId, status: after }),
+          delayMs: BATCH_WINDOW_MS,
+          coalesceKey: `presence:${userId}`,
         });
       }
     });
@@ -1525,7 +1593,8 @@ export class ServerCore {
     this.sql.exec("INSERT INTO members (user_id, nick, joined_at) VALUES (?, NULL, ?)", userId, now);
 
     const after = this.load();
-    this.emit({ users: after.members.keys(), event: event("MEMBER_ADD", this.memberPayload(after, userId)) });
+    // Other members hear about joins in batches; the joiner gets the server now.
+    this.emit({ users: after.members.keys(), event: event("MEMBER_ADD", this.memberPayload(after, userId)), delayMs: BATCH_WINDOW_MS });
     this.emit({ users: [userId], event: event("SERVER_CREATE", this.snapshotFor(after, userId)) });
     const reply: Reply = { status: 200, body: { serverId: server.id } };
     if (exhausted) reply.effects = { inviteGone: code };

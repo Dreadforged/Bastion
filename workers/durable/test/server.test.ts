@@ -26,6 +26,7 @@ beforeEach(async () => {
   bobWs = world.connect(bob);
   await world.frame(aliceWs, { op: "identify" });
   await world.frame(bobWs, { op: "identify" });
+  await world.settle();
   aliceWs.clear();
   bobWs.clear();
 });

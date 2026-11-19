@@ -61,8 +61,11 @@ describe("invites", () => {
     const { body } = await invite();
     const reply = await accept(alice, body.code);
     expect(reply).toMatchObject({ status: 200, body: { serverId } });
-    expect(ownerWs.types()).toEqual(["MEMBER_ADD"]);
+    // The joiner gets the server at once; everyone else hears in the next batch.
     expect(aliceWs.types()).toEqual(["MEMBER_ADD", "SERVER_CREATE"]);
+    expect(ownerWs.types()).toEqual([]);
+    await world.settle();
+    expect(ownerWs.types()).toEqual(["MEMBER_ADD"]);
     expect(world.session(alice).core.serverIds()).toEqual([serverId]);
   });
 

@@ -4,7 +4,7 @@
  */
 import { newId, type GatewayEvent, type GatewayServerFrame } from "@bastion/shared";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
-import { ServerCore } from "../src/server/core.js";
+import { BATCH_WINDOW_MS, ServerCore } from "../src/server/core.js";
 import { SERVER_MIGRATIONS } from "../src/server/schema.js";
 import type { ServerOpInput } from "../src/server/ops.js";
 import { SessionCore, type Attachment, type Conn } from "../src/session/core.js";
@@ -101,6 +101,8 @@ export class World {
   readonly down = new Set<string>();
   readonly servers = new Map<string, ServerCore>();
   readonly sessions = new Map<string, SessionEntry>();
+  /** How many times each user's session was called with events. */
+  readonly deliveries = new Map<string, number>();
   private keyCounter = 0;
 
   server(serverId: string): ServerCore {
@@ -112,6 +114,7 @@ export class World {
         now: () => this.now,
         deliver: async (userId: string, events: GatewayEvent[]) => {
           if (this.down.has(userId)) throw new Error("unreachable");
+          this.deliveries.set(userId, (this.deliveries.get(userId) ?? 0) + 1);
           const session = this.session(userId);
           session.core.receive(events, this.open(session));
         },
@@ -161,6 +164,12 @@ export class World {
   async frame(conn: TestConn, frame: unknown): Promise<void> {
     const entry = this.session(conn.attachment.userId);
     await entry.core.onMessage(conn, typeof frame === "string" ? frame : JSON.stringify(frame), this.open(entry));
+  }
+
+  /** Let batched events (presence, joins) go out, as the alarm would. */
+  async settle(): Promise<void> {
+    this.now += BATCH_WINDOW_MS;
+    for (const server of this.servers.values()) await server.flush();
   }
 
   async disconnect(conn: TestConn): Promise<void> {
