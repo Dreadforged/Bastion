@@ -17,35 +17,6 @@ export const User = z.object({
 });
 export type User = z.infer<typeof User>;
 
-/**
- * Message envelope. Content is end-to-end encrypted with MLS, so the server
- * only ever sees ciphertext.
- */
-export const MessageEnvelope = z.object({
-  id: Id,
-  conversationId: Id,
-  senderId: Id,
-  ciphertext: z.base64(),
-  epoch: z.number().int().nonnegative(),
-});
-export type MessageEnvelope = z.infer<typeof MessageEnvelope>;
-
-/** Client to server WebSocket frames. */
-export const ClientFrame = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("ping") }),
-  z.object({ type: z.literal("subscribe"), conversationId: Id }),
-  z.object({ type: z.literal("send"), message: MessageEnvelope }),
-]);
-export type ClientFrame = z.infer<typeof ClientFrame>;
-
-/** Server to client WebSocket frames. */
-export const ServerFrame = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("pong") }),
-  z.object({ type: z.literal("message"), message: MessageEnvelope }),
-  z.object({ type: z.literal("error"), code: z.string(), message: z.string() }),
-]);
-export type ServerFrame = z.infer<typeof ServerFrame>;
-
 export * from "./auth.js";
 export * from "./servers.js";
 export * from "./gateway.js";
