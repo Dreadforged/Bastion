@@ -206,3 +206,55 @@ fn bad_state_is_rejected() {
     assert!(Client::load_state(&saved).is_err());
     assert!(Client::load_state(b"").is_err());
 }
+
+const VOICE: &str = "bastion/voice/v1";
+
+#[test]
+fn exporter_agrees_between_members_and_separates_contexts() {
+    let mut c = group_of(&["alice", "bob"]);
+    let a = c[0].export_secret(GROUP, VOICE, b"room-1", 32).unwrap();
+    let b = c[1].export_secret(GROUP, VOICE, b"room-1", 32).unwrap();
+    assert_eq!(a.len(), 32);
+    assert_eq!(a, b);
+    // A different call, label or length gives unrelated bytes.
+    assert_ne!(a, c[0].export_secret(GROUP, VOICE, b"room-2", 32).unwrap());
+    assert_ne!(a, c[0].export_secret(GROUP, "bastion/voice/v2", b"room-1", 32).unwrap());
+    assert_ne!(a[..16], c[0].export_secret(GROUP, VOICE, b"room-1", 16).unwrap()[..]);
+}
+
+#[test]
+fn exporter_changes_every_epoch_and_removed_members_lose_it() {
+    let mut c = group_of(&["alice", "bob", "carol"]);
+    let before = c[0].export_secret(GROUP, VOICE, b"room", 32).unwrap();
+
+    // A join or leave from the call is a self update: new epoch, new key.
+    let out = c[1].update_keys(GROUP).unwrap();
+    c[1].commit_accepted(GROUP).unwrap();
+    c[0].receive(GROUP, &out.commit).unwrap();
+    c[2].receive(GROUP, &out.commit).unwrap();
+    let after = c[0].export_secret(GROUP, VOICE, b"room", 32).unwrap();
+    assert_ne!(before, after);
+    assert_eq!(after, c[1].export_secret(GROUP, VOICE, b"room", 32).unwrap());
+    assert_eq!(after, c[2].export_secret(GROUP, VOICE, b"room", 32).unwrap());
+
+    // Carol is removed: she keeps the old key but can't reach the new one.
+    let out = c[0].remove_members(GROUP, &[b"carol".to_vec()]).unwrap();
+    c[0].commit_accepted(GROUP).unwrap();
+    c[1].receive(GROUP, &out.commit).unwrap();
+    let newest = c[0].export_secret(GROUP, VOICE, b"room", 32).unwrap();
+    assert_ne!(newest, after);
+    assert_eq!(newest, c[1].export_secret(GROUP, VOICE, b"room", 32).unwrap());
+    assert_eq!(c[2].receive(GROUP, &out.commit).unwrap(), Incoming::Removed);
+    assert!(c[2].export_secret(GROUP, VOICE, b"room", 32).is_err());
+}
+
+#[test]
+fn exporter_survives_reload_and_rejects_bad_lengths() {
+    let mut c = group_of(&["alice", "bob"]);
+    let key = c[0].export_secret(GROUP, VOICE, b"room", 32).unwrap();
+    let mut bob = Client::load_state(&c[1].save_state().unwrap()).unwrap();
+    assert_eq!(bob.export_secret(GROUP, VOICE, b"room", 32).unwrap(), key);
+    assert!(c[0].export_secret(GROUP, VOICE, b"room", 0).is_err());
+    assert!(c[0].export_secret(GROUP, VOICE, b"room", 65).is_err());
+    assert!(c[0].export_secret(b"nope", VOICE, b"room", 32).is_err());
+}

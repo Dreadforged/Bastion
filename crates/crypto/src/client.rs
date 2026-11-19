@@ -326,6 +326,32 @@ impl Client {
         Ok(self.group(group_id)?.epoch().as_u64())
     }
 
+    /// Derives a secret from the current epoch with the MLS exporter
+    /// (RFC 9420 section 8.5). Every member of the group at this epoch gets the
+    /// same bytes for the same `label` and `context`; anyone outside the group,
+    /// or a member removed before this epoch, can't compute them. Used to key
+    /// voice and screen share media.
+    ///
+    /// The secret changes whenever the epoch does. Callers pick a label that
+    /// names the use (`bastion/voice/v1`) and a context that separates
+    /// instances within one epoch (a call's room id).
+    pub fn export_secret(
+        &mut self,
+        group_id: &[u8],
+        label: &str,
+        context: &[u8],
+        length: usize,
+    ) -> Result<Vec<u8>, CryptoError> {
+        if length == 0 || length > 64 {
+            return Err(CryptoError::Malformed);
+        }
+        let provider = &self.provider;
+        let group = self.groups.get(group_id).ok_or(CryptoError::UnknownGroup)?;
+        group
+            .export_secret(provider.crypto(), label, context, length)
+            .map_err(mls_err)
+    }
+
     /// Identities of the group's members, in leaf order.
     pub fn members(&mut self, group_id: &[u8]) -> Result<Vec<Vec<u8>>, CryptoError> {
         Ok(self

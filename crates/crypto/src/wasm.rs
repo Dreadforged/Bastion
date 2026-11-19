@@ -209,6 +209,20 @@ impl WasmClient {
         self.inner.identity_key().to_vec()
     }
 
+    /// MLS exporter secret for the group's current epoch, 1 to 64 bytes.
+    #[wasm_bindgen(js_name = exportSecret)]
+    pub fn export_secret(
+        &mut self,
+        group_id: &[u8],
+        label: &str,
+        context: &[u8],
+        length: usize,
+    ) -> Result<Vec<u8>, JsError> {
+        self.inner
+            .export_secret(group_id, label, context, length)
+            .map_err(js_err)
+    }
+
     pub fn epoch(&mut self, group_id: &[u8]) -> Result<f64, JsError> {
         self.inner.epoch(group_id).map(|e| e as f64).map_err(js_err)
     }
