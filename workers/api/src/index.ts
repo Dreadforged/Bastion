@@ -16,7 +16,7 @@ import { NoopScanner } from "./files/scanner.js";
 import { R2S3Signer } from "./files/presign.js";
 import { cleanupPendingFiles, handleFiles } from "./files/routes.js";
 import { handleFileServe } from "./files/serve.js";
-import { cleanupInviteCodes, handleServers } from "./servers/routes.js";
+import { cleanupInviteCodes, cleanupLiveStreams, handleServers } from "./servers/routes.js";
 import { HttpLiveKitAdmin, type VoiceDeps } from "./voice/livekit.js";
 import type { Conversation, Server, UserSession } from "@bastion/durable";
 
@@ -219,6 +219,7 @@ export default {
   async scheduled(_controller, env): Promise<void> {
     await cleanupExpired(env.DB, Date.now());
     await cleanupInviteCodes(env.DB, Date.now());
+    await cleanupLiveStreams(env.DB, Date.now());
     await cleanupPendingFiles(env.DB, env.FILES, Date.now());
     await purgeRemovedAccounts({ ...deletionPorts(env), db: env.DB, now: Date.now }, Date.now());
     await advanceAgeBands(env.DB, flagsFor(env), Date.now(), (userId) => syncAgeLimit({ db: env.DB, sessions: env.USER_SESSION, servers: env.SERVER }, userId));
