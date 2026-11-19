@@ -1442,12 +1442,13 @@ export class ServerCore {
   }
 
   /**
-   * Rooms with a live stream hold at most that stream's viewer limit of other
+   * A room holds at most VOICE_LIMITS.maxRoomParticipants people. Rooms with a live stream hold at most that stream's viewer limit of other
    * people. LiveKit does not report who is watching, so everyone in the room
    * who is not streaming counts, which keeps the cap safe.
    */
   private requireRoomFor(channelId: string, userId: string): void {
     const others = this.voiceRows().filter((v) => v.channel_id === channelId && v.user_id !== userId);
+    if (others.length + 1 > s.VOICE_LIMITS.maxRoomParticipants) fail(409, "room_full");
     const cap = this.streamCap(others.filter((v) => v.streaming === 1));
     if (cap === null) return;
     if (others.filter((v) => v.streaming === 0).length + 1 > cap) fail(409, "stream_full");

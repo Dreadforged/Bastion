@@ -389,6 +389,36 @@ describe("screen share", () => {
   });
 });
 
+// ------------------------------------------------------------------ room size
+
+describe("room size", () => {
+  it("holds at most the room limit, streaming or not", async () => {
+    const limit = schemas.VOICE_LIMITS.maxRoomParticipants;
+    const people = await crowd(limit - 1);
+    world.now += 3000;
+    expect((await join(mod)).status).toBe(200);
+    world.now += 3000;
+    expect((await join(bob)).body).toEqual({ error: "room_full" });
+    expect(await list(owner)).toHaveLength(limit);
+
+    // Someone already in the room can still refresh their token.
+    world.now += 3000;
+    expect((await join(people[0]!)).status).toBe(200);
+
+    // A free seat is usable straight away, and other rooms are unaffected.
+    expect((await leave(people[1]!)).status).toBe(204);
+    world.now += 3000;
+    expect((await join(bob)).status).toBe(200);
+    const other = await createChannel("second", "voice");
+    world.now += 3000;
+    expect((await join(alice, { channelId: other })).status).toBe(200);
+  });
+
+  it("matches LiveKit's backstop of 100", () => {
+    expect(schemas.VOICE_LIMITS.maxRoomParticipants).toBeLessThan(100);
+  });
+});
+
 // ------------------------------------------------------------------ quality and viewer limits
 
 describe("viewer limits", () => {

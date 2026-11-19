@@ -49,6 +49,9 @@ moderators to be able to act on a call as fast as on a text channel.
   exists everyone is `free`. LiveKit does not say who is watching, so while a
   stream is live the room holds at most the weakest streamer's viewer limit of
   other people, and a joiner over it gets `stream_full`.
+- **Room size.** A voice room holds at most 99 people, streaming or not
+  (`VOICE_LIMITS.maxRoomParticipants`), one under LiveKit's own backstop of 100.
+  A join over it gets `room_full`.
 - **Not in the default permissions.** STREAM is bit 15 and is not in the
   default @everyone set. Servers turn it on for roles or channels.
 

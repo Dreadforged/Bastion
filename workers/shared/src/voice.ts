@@ -21,6 +21,12 @@ export const VOICE_LIMITS = {
    * `PATCH /servers/:id/voice` about every 30 seconds while in a call.
    */
   leaseSeconds: 90,
+  /**
+   * Most people in one voice room, streaming or not. One under LiveKit's own
+   * backstop (`max_participants: 100` in ops/livekit/setup.sh) so the Worker
+   * refuses first and the answer is ours, not a dropped connection.
+   */
+  maxRoomParticipants: 99,
 } as const;
 
 export interface StreamQuality {
