@@ -58,6 +58,13 @@ function idempotencyKey(request: Request): string | null {
   return result.data;
 }
 
+function query<T extends z.ZodType>(request: Request, schema: T): z.output<T> {
+  const params = Object.fromEntries(new URL(request.url).searchParams);
+  const result = schema.safeParse(params);
+  if (!result.success) throw new HttpError(400, "invalid_request");
+  return result.data;
+}
+
 /** Hide the Worker-only `effects` from clients. */
 function reply(r: Reply): Response {
   return json(r.status === 204 ? null : r.body, r.status);
@@ -70,6 +77,7 @@ async function serverOp(request: Request, parts: string[], principal: Principal)
   const n = parts.length;
 
   if (n === 2 && m === "PATCH") return { type: "server.update", body: await body(request, schemas.UpdateServerRequest) };
+  if (n === 2 && m === "DELETE") return { type: "server.delete" };
 
   if (a === "channels") {
     if (n === 3 && m === "POST") return { type: "channel.create", body: await body(request, schemas.CreateChannelRequest) };
@@ -86,12 +94,7 @@ async function serverOp(request: Request, parts: string[], principal: Principal)
       if (m === "DELETE") return { type: "override.delete", channelId, kind: kind.data, targetId };
     }
     if (c === "messages") {
-      if (n === 5 && m === "GET") {
-        const params = Object.fromEntries(new URL(request.url).searchParams);
-        const query = schemas.MessageHistoryQuery.safeParse(params);
-        if (!query.success) throw new HttpError(400, "invalid_request");
-        return { type: "messages.list", channelId, query: query.data };
-      }
+      if (n === 5 && m === "GET") return { type: "messages.list", channelId, query: query(request, schemas.MessageHistoryQuery) };
       if (n === 5 && m === "POST") return { type: "message.create", channelId, body: await body(request, schemas.CreateMessageRequest) };
       const messageId = id(d);
       if (n === 6 && m === "PATCH") {
@@ -113,7 +116,11 @@ async function serverOp(request: Request, parts: string[], principal: Principal)
 
   if (a === "members") {
     const userId = b === "@me" ? principal.userId : id(b);
-    if (n === 4 && m === "DELETE") return { type: "member.remove", userId };
+    if (n === 4 && m === "DELETE") return { type: "member.remove", userId, body: await body(request, schemas.ReasonRequest) };
+    if (n === 5 && c === "timeout") {
+      if (m === "PUT") return { type: "member.timeout", userId, body: await body(request, schemas.TimeoutRequest) };
+      if (m === "DELETE") return { type: "member.timeout.remove", userId, body: await body(request, schemas.ReasonRequest) };
+    }
     if (n === 6 && c === "roles") {
       const roleId = id(d);
       if (m === "PUT") return { type: "member.role.add", userId, roleId };
@@ -122,12 +129,23 @@ async function serverOp(request: Request, parts: string[], principal: Principal)
     return null;
   }
 
-  if (a === "bans" && n === 4) {
+  if (a === "bans") {
+    if (n === 3 && m === "GET") return { type: "bans.list", query: query(request, schemas.BanListQuery) };
+    if (n !== 4) return null;
     const userId = id(b);
-    if (m === "PUT") return { type: "ban.put", userId };
-    if (m === "DELETE") return { type: "ban.delete", userId };
+    if (m === "PUT") return { type: "ban.put", userId, body: await body(request, schemas.BanRequest) };
+    if (m === "DELETE") return { type: "ban.delete", userId, body: await body(request, schemas.ReasonRequest) };
     return null;
   }
+
+  if (a === "reports") {
+    if (n === 3 && m === "POST") return { type: "report.create", body: await body(request, schemas.CreateReportRequest) };
+    if (n === 3 && m === "GET") return { type: "reports.list", query: query(request, schemas.ReportListQuery) };
+    if (n === 4 && m === "PATCH") return { type: "report.update", reportId: id(b), body: await body(request, schemas.UpdateReportRequest) };
+    return null;
+  }
+
+  if (a === "audit-log" && n === 3 && m === "GET") return { type: "audit.list", query: query(request, schemas.AuditLogQuery) };
 
   if (a === "invites" && n === 3 && m === "POST") {
     return { type: "invite.create", body: await body(request, schemas.CreateInviteRequest) };
@@ -146,6 +164,7 @@ async function applyEffects(deps: ServerRouteDeps, serverId: string, r: Reply): 
   }
   const gone = r.effects?.inviteGone;
   if (gone) await deps.db.prepare("DELETE FROM invite_codes WHERE code = ?").bind(gone).run();
+  if (r.effects?.serverDeleted) await deps.db.prepare("DELETE FROM invite_codes WHERE server_id = ?").bind(serverId).run();
 }
 
 async function inviteServer(deps: ServerRouteDeps, code: string): Promise<string> {
@@ -180,8 +199,8 @@ async function gateway(request: Request, deps: ServerRouteDeps): Promise<Respons
 }
 
 /**
- * Routes for servers, channels, roles, members, messages, invites, presence
- * and the gateway. Returns null for paths it doesn't own.
+ * Routes for servers, channels, roles, members, messages, invites, presence,
+ * moderation and the gateway. Returns null for paths it doesn't own.
  */
 export async function handleServers(request: Request, deps: ServerRouteDeps): Promise<Response | null> {
   const { pathname } = new URL(request.url);
