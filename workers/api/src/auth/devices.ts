@@ -18,7 +18,11 @@ export async function listDevices(deps: AuthDeps, principal: Principal): Promise
   }));
 }
 
-/** Removes the passkey and signs the device out everywhere (sessions cascade). */
+/**
+ * Removes the passkey and signs the device out everywhere (sessions and key
+ * packages cascade). Its encrypted conversations cut it off until a member
+ * removes its MLS leaf.
+ */
 export async function revokeDevice(deps: AuthDeps, principal: Principal, deviceId: string): Promise<void> {
   const { results: sessions } = await deps.db
     .prepare("SELECT id FROM sessions WHERE device_id = ? AND user_id = ?")
@@ -29,6 +33,13 @@ export async function revokeDevice(deps: AuthDeps, principal: Principal, deviceI
     .bind(deviceId, principal.userId)
     .run();
   if (result.meta.changes !== 1) throw new AuthError(404, "not_found");
+  if (deps.revokeConversationDevice) {
+    const { results: conversations } = await deps.db
+      .prepare("SELECT conversation_id FROM conversation_members WHERE user_id = ?")
+      .bind(principal.userId)
+      .all<{ conversation_id: string }>();
+    await Promise.allSettled(conversations.map((c) => deps.revokeConversationDevice!(c.conversation_id, deviceId)));
+  }
   await closeSockets(
     deps,
     sessions.map((s) => ({ userId: principal.userId, sessionId: s.id })),

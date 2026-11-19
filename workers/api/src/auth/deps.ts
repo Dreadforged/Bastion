@@ -13,6 +13,8 @@ export interface AuthDeps {
    * auth tests can run without Durable Objects.
    */
   endSessions?: ((userId: string, sessionIds: string[]) => Promise<void>) | undefined;
+  /** Cut a removed device off from an encrypted conversation. Optional in tests. */
+  revokeConversationDevice?: ((conversationId: string, deviceId: string) => Promise<void>) | undefined;
 }
 
 /** Close ended sessions' sockets. Best effort: the tokens are already dead. */

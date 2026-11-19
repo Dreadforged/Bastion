@@ -225,7 +225,7 @@ describe("encrypted channels", () => {
     now += CONVERSATION_LIMITS.auditIntervalMs;
     const blocked = await send(bob, "secret");
     expect(blocked.status).toBe(409);
-    expect(blocked.body).toEqual({ error: "rotation_required", userIds: [carol.userId] });
+    expect(blocked.body).toEqual({ error: "rotation_required", userIds: [carol.userId], deviceIds: [] });
 
     // Carol is cut off at once: no reads past the cutoff, no writes.
     expect((await send(carol, "still here?", 1)).body).toMatchObject({ error: "access_revoked" });
@@ -271,5 +271,27 @@ describe("retries", () => {
     expect(again).toEqual(first);
     expect((await core.handle(alice, { type: "send", body: { epoch: 1, ciphertext: blob("x") } }, "same-key-1")).status).toBe(422);
     expect((await core.handle(alice, { type: "send", body: { epoch: 1, ciphertext: blob("x") } }, null)).status).toBe(400);
+  });
+});
+
+describe("signed-out devices", () => {
+  it("cuts a device off and blocks messages until its leaf is removed", async () => {
+    const [owner, bob] = [user(), user()];
+    const bobPhone = deviceOf(bob);
+    await init("group", owner);
+    await commit(owner, { adds: [bob, bobPhone] });
+    await send(owner, "before");
+
+    await core.revokeDevices([bobPhone.deviceId]);
+    const blocked = await send(owner, "after");
+    expect(blocked.body).toEqual({ error: "rotation_required", userIds: [], deviceIds: [bobPhone.deviceId] });
+    expect((await send(bobPhone, "me?", 1)).body).toMatchObject({ error: "device_revoked" });
+    const seen = await kinds(bobPhone);
+
+    // Any member may remove a revoked device, not just the owner.
+    expect((await commit(bob, { removes: [bobPhone] })).status).toBe(201);
+    expect((await send(owner, "after")).status).toBe(201);
+    expect(await kinds(bobPhone)).toEqual(seen);
+    expect(await texts(bob)).toEqual(["before", "after"]);
   });
 });

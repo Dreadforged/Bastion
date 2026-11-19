@@ -13,10 +13,11 @@ import { takeToken, type Bucket, type Storage } from "../storage.js";
  * Commits list the devices they add and remove, so the object can enforce
  * who may change membership. Clients check the MLS commit itself.
  *
- * When a member loses access (a channel permission change, or `revoke`) they
- * are cut off from new items at once and marked pending removal. No new
- * messages are accepted until a member commits their removal, so nothing is
- * ever encrypted under keys they still hold.
+ * When a member loses access (a channel permission change, a kick or ban,
+ * or `revoke`) they are cut off from new items at once and marked pending
+ * removal. A signed-out device (`revokeDevices`) is treated the same way. No
+ * new messages are accepted until a member commits the removal, so nothing
+ * is ever encrypted under keys they still hold.
  */
 
 export const CONVERSATION_LIMITS = {
@@ -91,6 +92,7 @@ interface DeviceRow {
   user_id: string;
   joined_seq: number;
   left_seq: number | null;
+  revoked_seq: number | null;
 }
 
 class Fail extends Error {
@@ -220,6 +222,21 @@ export class ConversationCore {
     if (!this.conv()) return;
     const marked = this.markPending(userIds);
     if (marked.length > 0) await this.notify(this.readers(), this.lastSeq());
+  }
+
+  /** Cuts off devices that were signed out, until a commit removes them. */
+  async revokeDevices(deviceIds: string[]): Promise<void> {
+    if (!this.conv()) return;
+    const seq = this.lastSeq();
+    let changed = 0;
+    for (const deviceId of deviceIds) {
+      changed += this.sql.exec(
+        "UPDATE devices SET revoked_seq = ? WHERE device_id = ? AND left_seq IS NULL AND revoked_seq IS NULL",
+        seq,
+        deviceId,
+      ).rowsWritten;
+    }
+    if (changed > 0) await this.notify(this.readers(), seq);
   }
 
   private markPending(userIds: readonly string[]): string[] {
@@ -360,6 +377,7 @@ export class ConversationCore {
     const m = this.requireMember(actor.userId);
     const d = this.device(actor.deviceId);
     if (!d || d.user_id !== actor.userId || d.left_seq !== null) fail(403, "device_not_in_group");
+    if (d.revoked_seq !== null) fail(403, "device_revoked");
     return m;
   }
 
@@ -371,6 +389,7 @@ export class ConversationCore {
     // their client sees it; pending ones stop where they were cut off.
     const until = Math.min(
       d.left_seq ?? Number.MAX_SAFE_INTEGER,
+      d.revoked_seq ?? Number.MAX_SAFE_INTEGER,
       m?.pending_removal === 1 ? (m.cutoff_seq ?? 0) : Number.MAX_SAFE_INTEGER,
     );
     const rows = this.sql
@@ -419,7 +438,10 @@ export class ConversationCore {
     if (body.epoch !== conv.epoch) fail(409, "stale_epoch", { epoch: conv.epoch });
     // Keys must rotate before anything new is said.
     const pending = this.members().filter((m) => m.pending_removal === 1);
-    if (pending.length > 0) fail(409, "rotation_required", { userIds: pending.map((m) => m.user_id) });
+    const revoked = this.activeDevices().filter((d) => d.revoked_seq !== null);
+    if (pending.length > 0 || revoked.length > 0) {
+      fail(409, "rotation_required", { userIds: pending.map((m) => m.user_id), deviceIds: revoked.map((d) => d.device_id) });
+    }
 
     this.sql.exec(
       "INSERT INTO log (kind, sender_id, sender_device_id, epoch, data, created_at) VALUES ('message', ?, ?, ?, ?, ?)",
@@ -455,8 +477,8 @@ export class ConversationCore {
       removedDevices.add(r.deviceId);
       if (r.userId === actor.userId) continue;
       const target = members.get(r.userId);
-      // Your own devices, anyone cut off, or anyone at all for a group owner.
-      const allowed = target?.pending_removal === 1 || (conv.kind === "group" && me.role === "owner");
+      // Your own devices, anyone or any device cut off, or anyone at all for a group owner.
+      const allowed = d.revoked_seq !== null || target?.pending_removal === 1 || (conv.kind === "group" && me.role === "owner");
       if (!allowed) fail(403, "cannot_remove", { userId: r.userId });
     }
     if (removedDevices.has(actor.deviceId)) fail(400, "cannot_remove_self_device");
@@ -516,7 +538,8 @@ export class ConversationCore {
         for (const a of body.adds) {
           this.sql.exec(
             `INSERT INTO devices (device_id, user_id, joined_seq) VALUES (?, ?, ?)
-             ON CONFLICT (device_id) DO UPDATE SET user_id = excluded.user_id, joined_seq = excluded.joined_seq, left_seq = NULL`,
+             ON CONFLICT (device_id) DO UPDATE SET
+               user_id = excluded.user_id, joined_seq = excluded.joined_seq, left_seq = NULL, revoked_seq = NULL`,
             a.deviceId,
             a.userId,
             welcomeSeq,

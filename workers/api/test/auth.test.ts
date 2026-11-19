@@ -39,6 +39,7 @@ let now: number;
 let ipAllowed: boolean;
 /** Sessions whose gateway sockets the routes asked to close. */
 let ended: { userId: string; sessionIds: string[] }[];
+let revokedDevices: { conversationId: string; deviceId: string }[];
 
 beforeEach(() => {
   db = createTestD1();
@@ -46,6 +47,7 @@ beforeEach(() => {
   now = Date.UTC(2026, 10, 18);
   ipAllowed = true;
   ended = [];
+  revokedDevices = [];
 });
 
 async function userIdOf(address = "user@example.com") {
@@ -80,6 +82,9 @@ async function call(method: string, path: string, body?: unknown, token?: string
       now: () => now,
       endSessions: async (userId, sessionIds) => {
         ended.push({ userId, sessionIds });
+      },
+      revokeConversationDevice: async (conversationId, deviceId) => {
+        revokedDevices.push({ conversationId, deviceId });
       },
     },
     ipLimit,
@@ -329,7 +334,7 @@ describe("adding a device", () => {
 });
 
 describe("devices", () => {
-  it("revoking a device signs it out", async () => {
+  it("revoking a device signs it out and cuts it off from conversations", async () => {
     const first = await signUp();
     await call("POST", "/auth/devices/link", { email: "user@example.com" });
     const second = await registerPasskey(lastLinkToken(), "Phone");
@@ -338,8 +343,12 @@ describe("devices", () => {
     const phoneSessions = await sessionIds({ deviceId: phone.id });
     expect(phoneSessions).toHaveLength(1);
 
+    const userId = await userIdOf();
+    await db.prepare("INSERT INTO conversation_members (conversation_id, user_id) VALUES ('AAAAAAAAAAAAAAAAAAAAAA', ?)").bind(userId).run();
+
     expect((await call("DELETE", `/auth/devices/${phone.id}`, undefined, first.body.tokens.accessToken)).status).toBe(204);
-    expect(ended).toEqual([{ userId: await userIdOf(), sessionIds: phoneSessions }]);
+    expect(ended).toEqual([{ userId, sessionIds: phoneSessions }]);
+    expect(revokedDevices).toEqual([{ conversationId: "AAAAAAAAAAAAAAAAAAAAAA", deviceId: phone.id }]);
     expect((await call("GET", "/auth/devices", undefined, second.body.tokens.accessToken)).status).toBe(401);
     expect((await signIn(second.credentialId)).status).toBe(401);
   });

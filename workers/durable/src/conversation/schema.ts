@@ -54,4 +54,8 @@ export const CONVERSATION_MIGRATIONS: readonly string[] = [
     PRIMARY KEY (user_id, key)
   );
   `,
+  `
+  -- A signed-out device: cut off at revoked_seq until a commit removes its leaf.
+  ALTER TABLE devices ADD COLUMN revoked_seq INTEGER;
+  `,
 ];
