@@ -27,6 +27,13 @@ export const VOICE_LIMITS = {
    * refuses first and the answer is ours, not a dropped connection.
    */
   maxRoomParticipants: 99,
+  /**
+   * Live streams at once in one room. Every other person can subscribe to every
+   * stream, so each extra stream multiplies what the media server sends.
+   */
+  maxStreamsPerRoom: 4,
+  /** Live streams at once for one account, across all servers. */
+  maxStreamsPerAccount: 1,
 } as const;
 
 export interface StreamQuality {
