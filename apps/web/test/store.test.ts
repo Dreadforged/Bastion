@@ -9,7 +9,7 @@ const C2 = "01HZZZZZZZZZZZZZZZZZZZZZC2";
 const mid = (n: number) => `01HZZZZZZZZZZZZZZZZZZZZM${String(n).padStart(2, "0")}`;
 
 const channel = (id: string, position: number, kind: "text" | "voice" = "text") => ({
-  id, serverId: S, name: id.slice(-2), kind, position, overrides: [], slowModeSeconds: 0,
+  id, serverId: S, name: id.slice(-2), kind, position, overrides: [], slowModeSeconds: 0, ageRestricted: false,
 });
 const member = (userId: string) => ({ serverId: S, userId, nick: null, roles: [], joinedAt: 1, timeoutUntil: null });
 const message = (n: number, channelId = C1) => ({

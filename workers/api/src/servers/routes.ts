@@ -2,6 +2,8 @@ import { GATEWAY_AUTH_PREFIX, GATEWAY_PROTOCOL, Id, schemas } from "@bastion/sha
 import type { Reply, Server, ServerOpInput, UserSession } from "@bastion/durable";
 import { SESSION_HEADERS } from "@bastion/durable/env";
 import { getPrivacy } from "../account/privacy.js";
+import { getClientConfig } from "../safety/account.js";
+import type { FlagReader } from "../safety/flags.js";
 import type { z } from "zod";
 import { AuthError } from "../auth/errors.js";
 import { json } from "../auth/routes.js";
@@ -22,6 +24,8 @@ export interface ServerRouteDeps {
   voice?: VoiceDeps | undefined;
   /** A user's plan, for stream quality and viewer limits. Everyone is on free if unset. */
   planFor?: ((userId: string) => Promise<schemas.Plan>) | undefined;
+  /** Region flags. Without them, age restricted channels cannot be created. */
+  flags?: FlagReader | undefined;
 }
 
 function inviteCode(value: string | undefined): string {
@@ -276,6 +280,11 @@ export async function handleServers(request: Request, deps: ServerRouteDeps): Pr
         if (op) {
           // Someone who turned typing indicators off never sends one.
           if (op.type === "typing" && !(await getPrivacy(deps.db, principal.userId)).typingIndicators) return json(null, 204);
+          // Age restricted channels exist only where the region allows them.
+          if ((op.type === "channel.create" || op.type === "channel.update") && op.body.ageRestricted === true) {
+            const config = deps.flags ? await getClientConfig(deps.db, deps.flags, principal.userId) : null;
+            if (!config?.ageRestrictedChannels) throw new HttpError(403, "age_restricted_channels_disabled");
+          }
           if (op.type === "voice.join" && !deps.voice) throw new HttpError(503, "voice_unavailable");
           const r = await handle(serverId, op);
           await applyEffects(deps, serverId, r);

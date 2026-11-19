@@ -204,4 +204,11 @@ export const SERVER_MIGRATIONS: readonly string[] = [
   CREATE INDEX voice_states_channel ON voice_states (channel_id);
   CREATE INDEX voice_states_expiry ON voice_states (expires_at);
   `,
+  `
+  -- Safety groundwork: age label on channels, fixed reason codes on audit entries,
+  -- and a hold that keeps a report from being deleted by the retention sweep.
+  ALTER TABLE channels ADD COLUMN age_restricted INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE audit_log ADD COLUMN reason_code TEXT;
+  ALTER TABLE reports ADD COLUMN legal_hold INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
