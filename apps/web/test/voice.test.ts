@@ -218,6 +218,9 @@ describe.skipIf(!built)("voice end-to-end keys over the real MLS core", () => {
       async publishMicrophone() {
         this.log.push("mic");
       }
+      async setMicrophoneEnabled(enabled: boolean) {
+        this.log.push(enabled ? "unmute" : "mute");
+      }
       async startScreenShare(c: unknown) {
         this.log.push(`share ${JSON.stringify(c)}`);
       }

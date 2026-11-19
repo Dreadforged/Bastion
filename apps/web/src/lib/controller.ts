@@ -1,4 +1,6 @@
-import { newId, Permission, computePermissions, type EventName, type ReadyPayload, type schemas } from "@bastion/shared";
+import { newId, Permission, computePermissions, EventPayloads, type EventName, type ReadyPayload, type schemas } from "@bastion/shared";
+import type { CallOptions, QualityTier } from "../voice/call.js";
+import { VoiceService, type VoiceUi } from "../voice/service.js";
 import { AuthClient } from "./auth.js";
 import { decodeBundle, E2ee, type DecryptedMessage, type MlsClient, type PersistedMeta } from "./e2ee.js";
 import { Gateway, type GatewayOptions, type GatewayStatus } from "./gateway.js";
@@ -21,6 +23,12 @@ export interface AppState {
   /** Decrypted channel messages by message id; null means this device can't read it. */
   plaintext: Record<string, schemas.MessagePayload | null>;
   dms: Record<string, DirectChat>;
+  /** The call this device is in (voice channel or DM), if any. */
+  voice: VoiceUi | null;
+  /** DM calls ringing for this person that nobody has answered. */
+  incomingCalls: schemas.DmCall[];
+  /** Something about a call worth showing: a stable code, not a sentence. Cleared by dismissCallNotice. */
+  callNotice: string | null;
   /** Last error to show, cleared by the next action. */
   error: string | null;
 }
@@ -32,6 +40,8 @@ export interface ControllerOptions {
   createMls: (userId: string, deviceId: string, saved: Uint8Array | null) => MlsClient | Promise<MlsClient>;
   /** Encrypted storage for MLS state. Without it, state lives in memory only. */
   vault?: StateVault;
+  /** LiveKit room factory for voice. Without it voice and calls are unavailable. */
+  voiceRoom?: Pick<CallOptions, "createRoom" | "createSink" | "e2eeSupported">;
   gatewayUrl: string;
   createSocket?: GatewayOptions["createSocket"];
 }
@@ -47,12 +57,19 @@ export class Controller {
     chat: emptyState,
     plaintext: {},
     dms: {},
+    voice: null,
+    incomingCalls: [],
+    callNotice: null,
     error: null,
   };
   private listeners = new Set<() => void>();
   private gateway: Gateway | null = null;
   private e2ee: E2ee | null = null;
   private deviceId: string | null = null;
+  private voiceService: VoiceService | null = null;
+  private ringTimer: ReturnType<typeof setTimeout> | null = null;
+  /** What each conversation turned out to be, so a call group is never shown as a chat. */
+  private readonly convInfo = new Map<string, { kind: schemas.ConversationKind; peerId: string | null }>();
 
   constructor(private readonly o: ControllerOptions) {}
 
@@ -150,8 +167,40 @@ export class Controller {
         ...(vault ? { persist: (bundle: Uint8Array) => vault.save(vaultId, bundle) } : {}),
         onPersistError: () => this.set({ error: "could_not_save_encryption_state" }),
       });
+      this.voiceService = this.makeVoice(this.e2ee);
       await this.guard(() => this.e2ee!.publishKeys());
     }
+  }
+
+  private makeVoice(e2ee: E2ee): VoiceService | null {
+    const room = this.o.voiceRoom;
+    if (!room) return null;
+    return new VoiceService(
+      {
+        api: this.o.api,
+        mls: () => e2ee.voice(),
+        sync: (id) => e2ee.syncGroup(id),
+        groupIdOf: (id) => e2ee.groupIdOf(id),
+        channelConversation: (channelId) => e2ee.channelConversation(channelId),
+        openChannel: async (serverId, channelId) => {
+          const members = Object.keys(this.state.chat.servers[serverId]?.members ?? {});
+          await e2ee.openChannel(serverId, channelId, members);
+        },
+        openDm: async (peerId) => {
+          const conv = await e2ee.openDm(peerId);
+          await this.syncDm(conv.id, peerId);
+          return conv.id;
+        },
+        markCallGroup: (id) => {
+          e2ee.markCallGroup(id);
+          this.convInfo.set(id, { kind: "group", peerId: null });
+        },
+        room,
+        onChange: (voice) => this.set({ voice }),
+        onNotice: (code) => this.set({ callNotice: code || null }),
+      },
+      () => this.state.chat.userId,
+    );
   }
 
   private onEvent(name: EventName, data: unknown) {
@@ -161,8 +210,45 @@ export class Controller {
       if (parsed) void this.decrypt([parsed]);
     } else if (name === "CONVERSATION_UPDATE") {
       const id = (data as { conversationId: string }).conversationId;
-      void this.syncDm(id);
+      void this.voiceService?.handleConversationUpdate(id).catch(() => undefined);
+      void this.onConversationUpdate(id);
+    } else if (name === "CALL_UPDATE") {
+      const call = EventPayloads.CALL_UPDATE.safeParse(data);
+      if (call.success && this.voiceService) {
+        this.voiceService.handleCallUpdate(call.data);
+        this.refreshRinging();
+      }
     }
+  }
+
+  /** What a conversation is. DMs become chats; a call group and channel groups are only kept in step. */
+  private async onConversationUpdate(id: string): Promise<void> {
+    if (!this.e2ee) return;
+    let info = this.convInfo.get(id);
+    if (!info && this.state.dms[id]) info = { kind: "dm", peerId: this.state.dms[id]!.peerId };
+    if (!info) {
+      try {
+        const conv = await this.o.api.get<schemas.Conversation>("/conversations/" + id);
+        const me = this.state.chat.userId;
+        info = { kind: conv.kind, peerId: conv.kind === "dm" ? (conv.members.find((m) => m.userId !== me)?.userId ?? null) : null };
+        this.convInfo.set(id, info);
+      } catch {
+        return;
+      }
+    }
+    if (info.kind === "dm") await this.syncDm(id, info.peerId ?? undefined);
+    // A call group is synced when the call is joined; a channel group, so its epochs stay current.
+    else if (info.kind === "channel") await this.e2ee.syncGroup(id).catch(() => undefined);
+  }
+
+  /** Keep the incoming call list in step, and drop each ring when it runs out. */
+  private refreshRinging(): void {
+    const ringing = this.voiceService?.ringing() ?? [];
+    this.set({ incomingCalls: ringing });
+    if (this.ringTimer) clearTimeout(this.ringTimer);
+    this.ringTimer = null;
+    const next = Math.min(...ringing.map((c) => c.ringExpiresAt));
+    if (Number.isFinite(next)) this.ringTimer = setTimeout(() => this.refreshRinging(), Math.max(0, next - Date.now()) + 50);
   }
 
   async signOut(): Promise<void> {
@@ -178,7 +264,13 @@ export class Controller {
     const e2ee = this.e2ee;
     this.e2ee = null;
     this.deviceId = null;
-    this.set({ phase: "signed-out", chat: emptyState, plaintext: {}, dms: {}, gateway: "idle" });
+    const voice = this.voiceService;
+    this.voiceService = null;
+    if (this.ringTimer) clearTimeout(this.ringTimer);
+    this.ringTimer = null;
+    this.convInfo.clear();
+    this.set({ phase: "signed-out", chat: emptyState, plaintext: {}, dms: {}, voice: null, incomingCalls: [], callNotice: null, gateway: "idle" });
+    await voice?.reset();
     // Let queued saves land first, otherwise one could write state back after the wipe.
     await e2ee?.close();
     await this.o.vault?.clear().catch(() => undefined);
@@ -333,6 +425,54 @@ export class Controller {
         },
       },
     }));
+  }
+
+  // ---------------------------------------------------------------- voice and calls
+
+  private requireVoice(): VoiceService {
+    if (!this.voiceService) throw new Error("voice_unavailable");
+    return this.voiceService;
+  }
+
+  /** Join a voice channel. Asks for screen share only if this person may stream there. */
+  joinVoice(serverId: string, channelId: string) {
+    return this.guard(() => this.requireVoice().joinChannel(serverId, channelId, this.can(serverId, channelId, Permission.STREAM)));
+  }
+
+  /** Leave the current call. In a DM call this ends it for both people. */
+  leaveVoice() {
+    return this.guard(() => this.requireVoice().leave());
+  }
+
+  setMuted(muted: boolean) {
+    return this.guard(() => this.requireVoice().setMuted(muted));
+  }
+
+  startShare(tier?: QualityTier) {
+    return this.guard(() => this.requireVoice().startShare(tier));
+  }
+
+  stopShare() {
+    return this.guard(() => this.requireVoice().stopShare());
+  }
+
+  /** Ring someone in a DM. */
+  callUser(peerId: string) {
+    return this.guard(() => this.requireVoice().startDmCall(peerId));
+  }
+
+  async answerCall(call: schemas.DmCall) {
+    await this.guard(() => this.requireVoice().answer(call));
+    this.refreshRinging();
+  }
+
+  async declineCall(call: schemas.DmCall) {
+    await this.guard(() => this.requireVoice().decline(call));
+    this.refreshRinging();
+  }
+
+  dismissCallNotice() {
+    this.set({ callNotice: null });
   }
 
   /** Remove a person's devices from a conversation (new keys, so they cannot read what comes next). */

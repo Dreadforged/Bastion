@@ -25,6 +25,11 @@ export interface CallGroupDeps {
   sync(conversationId: string): Promise<void>;
   /** Conversation ids are 16 bytes, base64url; the MLS group id is those bytes. */
   groupIdOf(conversationId: string): Uint8Array;
+  /**
+   * Called with a new call group's id as soon as it exists, before anything is
+   * committed to it, so the messaging layer can ignore it as a chat.
+   */
+  onCreated?(conversationId: string): void;
 }
 
 const MAX_ATTEMPTS = 4;
@@ -121,6 +126,7 @@ export async function startDmCallGroup(
 ): Promise<CallGroup> {
   const { api, mls } = deps;
   const conv = await api.post<{ id: string }>("/conversations", { kind: "group" }, { idempotencyKey: newIdempotencyKey() });
+  deps.onCreated?.(conv.id);
   const gid = deps.groupIdOf(conv.id);
   mls.createGroup(gid);
   const claimed = await api.post<{ keyPackages: { userId: string; deviceId: string; keyPackage: string }[]; exhausted: unknown[] }>(

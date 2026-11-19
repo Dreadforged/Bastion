@@ -23,9 +23,11 @@ export interface ChatState {
   typing: Record<string, TypingEntry[]>;
   /** Conversations that have new envelopes: id to highest seq announced. */
   conversationSeq: Record<string, number>;
+  /** Live DM calls (ringing or answered) by DM conversation id. Ended calls are dropped. */
+  calls: Record<string, schemas.DmCall>;
 }
 
-export const emptyState: ChatState = { userId: null, servers: {}, messages: {}, typing: {}, conversationSeq: {} };
+export const emptyState: ChatState = { userId: null, servers: {}, messages: {}, typing: {}, conversationSeq: {}, calls: {} };
 
 const TYPING_MS = 8000;
 
@@ -50,7 +52,8 @@ export function applyReady(state: ChatState, ready: ReadyPayload): ChatState {
     // Drop history for channels that are gone or no longer visible.
     if (Object.values(servers).some((s) => channelId in s.channels)) messages[channelId] = list;
   }
-  return { ...state, userId: ready.userId, servers, messages, typing: {} };
+  // Calls are not replayed after a reconnect, so any we knew about may be over.
+  return { ...state, userId: ready.userId, servers, messages, typing: {}, calls: {} };
 }
 
 /** Insert or replace by id, keeping ULID order (which is creation order). */
@@ -175,6 +178,10 @@ export function applyEvent(state: ChatState, name: EventName, data: unknown): Ch
         ...s,
         voice: v.channelId === null ? without(s.voice, v.userId) : { ...s.voice, [v.userId]: v },
       }));
+    }
+    case "CALL_UPDATE": {
+      const call = parsed.data as schemas.DmCall;
+      return { ...state, calls: call.state === "ended" ? without(state.calls, call.conversationId) : { ...state.calls, [call.conversationId]: call } };
     }
     case "CONVERSATION_UPDATE": {
       const { conversationId, seq } = d as { conversationId: string; seq: number };

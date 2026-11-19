@@ -21,7 +21,7 @@ interface Env {
 
 interface Conv {
   id: string;
-  kind: "dm" | "channel";
+  kind: "dm" | "channel" | "group";
   channelId: string | null;
   epoch: number;
   members: Set<string>;
@@ -85,6 +85,12 @@ export class FakeDelivery {
       this.channels.set(body.channelId, conv);
       return this.reply(201, this.view(conv));
     }
+    if (path === "/conversations" && m === "POST" && body.kind === "group") {
+      const id = `grp${this.n++}`.padEnd(22, "A");
+      const conv: Conv = { id, kind: "group", channelId: null, epoch: 0, members: new Set([userId]), devices: [{ userId, deviceId }], log: [] };
+      this.convs.set(id, conv);
+      return this.reply(201, this.view(conv));
+    }
     if (path === "/conversations" && m === "POST") {
       const peer = body.userId as string;
       const pair = [userId, peer].sort().join(":");
@@ -119,6 +125,7 @@ export class FakeDelivery {
         for (const rm of (body.removes ?? []) as { deviceId: string }[]) conv.devices = conv.devices.filter((d) => d.deviceId !== rm.deviceId);
         for (const add of body.adds as { userId: string; deviceId: string }[]) {
           conv.devices.push(add);
+          if (conv.kind === "group") conv.members.add(add.userId);
           this.push(conv, { kind: "welcome", senderId: userId, senderDeviceId: deviceId, epoch: conv.epoch, data: body.welcome, to: add.deviceId });
         }
         return this.reply(201, { seq, epoch: conv.epoch });

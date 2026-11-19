@@ -44,6 +44,10 @@ export class LiveKitCallRoom implements CallRoom {
     await this.room.localParticipant.setMicrophoneEnabled(true);
   }
 
+  async setMicrophoneEnabled(enabled: boolean): Promise<void> {
+    await this.room.localParticipant.setMicrophoneEnabled(enabled);
+  }
+
   async startScreenShare(c: ScreenCapture): Promise<void> {
     await this.room.localParticipant.setScreenShareEnabled(
       true,
@@ -60,6 +64,10 @@ export class LiveKitCallRoom implements CallRoom {
   onParticipant(handler: (event: "joined" | "left", id: string) => void): void {
     this.room.on(RoomEvent.ParticipantConnected, (p) => handler("joined", p.identity));
     this.room.on(RoomEvent.ParticipantDisconnected, (p) => handler("left", p.identity));
+  }
+
+  onDisconnected(handler: () => void): void {
+    this.room.on(RoomEvent.Disconnected, handler);
   }
 
   async disconnect(): Promise<void> {

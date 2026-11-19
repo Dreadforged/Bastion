@@ -2,6 +2,7 @@ import { Permission } from "@bastion/shared";
 import { useEffect, useRef, useState } from "react";
 import type { AppState, Controller } from "../lib/controller.js";
 import { sortedChannels, typingUsers } from "../lib/store.js";
+import { CallAlerts, CallBar, VoiceParticipants, voiceErrorText } from "./Voice.js";
 
 /** Short stand-in for a user id until profiles exist. */
 export function shortId(userId: string): string {
@@ -72,9 +73,11 @@ export function Shell({ controller, state }: { controller: Controller; state: Ap
         ) : (
           <DmList state={state} view={view} onOpen={(conversationId) => setView({ kind: "dm", conversationId })} />
         )}
+        <CallAlerts controller={controller} state={state} />
+        {state.voice && <CallBar controller={controller} ui={state.voice} />}
         {state.error && (
           <p role="alert" className="error">
-            {state.error}
+            {voiceErrorText(state.error)}
           </p>
         )}
         <p className={`status ${state.gateway}`}>{state.gateway === "ready" ? "Connected" : "Reconnecting…"}</p>
@@ -165,6 +168,20 @@ function ChannelList(props: {
             <li key={c.id}>
               <span className="voice">{c.name}</span>
               {inCall.length > 0 && <small> {inCall.length} in call</small>}
+              {props.state.voice?.channelId === c.id ? (
+                <button className="link" onClick={() => void props.controller.leaveVoice()}>
+                  Leave
+                </button>
+              ) : (
+                <button
+                  className="link"
+                  disabled={props.state.voice !== null || !props.controller.can(props.serverId, c.id, Permission.CONNECT_VOICE)}
+                  onClick={() => void props.controller.joinVoice(props.serverId, c.id)}
+                >
+                  Join
+                </button>
+              )}
+              <VoiceParticipants voice={server.voice} channelId={c.id} me={props.state.chat.userId} />
             </li>
           );
         })}
@@ -252,8 +269,11 @@ function DmView({ controller, state, conversationId }: { controller: Controller;
   if (!dm) return <p className="empty">Loading…</p>;
   return (
     <>
-      <header>
+      <header className="with-action">
         <h2>{shortId(dm.peerId)}</h2>
+        <button disabled={state.voice !== null || dm.peerId === ""} onClick={() => void controller.callUser(dm.peerId)}>
+          Call
+        </button>
       </header>
       <ol className="messages">
         {dm.messages.map((m) => (
