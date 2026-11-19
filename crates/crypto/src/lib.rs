@@ -1,8 +1,12 @@
 //! Bastion encryption core.
 //!
-//! This crate will wrap OpenMLS and expose group key management and message
-//! encryption to the web and desktop clients through WASM. It is a stub for
-//! now: only the version marker and error type exist.
+//! Message padding and safety codes. Group key management on OpenMLS
+//! comes next.
+
+pub mod padding;
+pub mod safety;
+
+pub use safety::safety_code;
 
 /// MLS protocol version the core targets (RFC 9420).
 pub const MLS_PROTOCOL_VERSION: &str = "mls10";
@@ -10,14 +14,17 @@ pub const MLS_PROTOCOL_VERSION: &str = "mls10";
 /// Errors surfaced by the encryption core.
 #[derive(Debug, PartialEq, Eq)]
 pub enum CryptoError {
-    /// The requested operation is not implemented yet.
-    NotImplemented,
+    /// Content is too large for the biggest padding bucket.
+    MessageTooLarge,
+    /// Input bytes couldn't be decoded.
+    Malformed,
 }
 
 impl core::fmt::Display for CryptoError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            CryptoError::NotImplemented => f.write_str("not implemented"),
+            CryptoError::MessageTooLarge => f.write_str("message too large"),
+            CryptoError::Malformed => f.write_str("malformed input"),
         }
     }
 }
