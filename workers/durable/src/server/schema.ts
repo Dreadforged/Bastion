@@ -179,4 +179,29 @@ export const SERVER_MIGRATIONS: readonly string[] = [
   CREATE INDEX outbox_coalesce ON outbox (coalesce_key);
   CREATE INDEX outbox_ready ON outbox (ready_at);
   `,
+  `
+  -- Voice. Only who is in a call right now: a row is deleted the moment the
+  -- person leaves, is removed or lets their lease run out. No history.
+  -- Rooms get a random id so LiveKit never sees a channel name.
+  CREATE TABLE voice_rooms (
+    channel_id TEXT PRIMARY KEY REFERENCES channels (id) ON DELETE CASCADE,
+    room_id    TEXT NOT NULL UNIQUE           -- 128 random bits as hex
+  );
+
+  CREATE TABLE voice_states (
+    user_id        TEXT PRIMARY KEY,
+    channel_id     TEXT NOT NULL REFERENCES channels (id) ON DELETE CASCADE,
+    participant_id TEXT NOT NULL UNIQUE,      -- random LiveKit identity, new for every join
+    self_mute      INTEGER NOT NULL DEFAULT 0,
+    self_deaf      INTEGER NOT NULL DEFAULT 0,
+    streaming      INTEGER NOT NULL DEFAULT 0,
+    stream_blocked INTEGER NOT NULL DEFAULT 0, -- a moderator ended their stream; lasts until they leave
+    can_publish    INTEGER NOT NULL,           -- what their last token allowed
+    can_share      INTEGER NOT NULL,
+    plan           TEXT NOT NULL,
+    expires_at     INTEGER NOT NULL            -- unix ms; clients renew about every 30 seconds
+  );
+  CREATE INDEX voice_states_channel ON voice_states (channel_id);
+  CREATE INDEX voice_states_expiry ON voice_states (expires_at);
+  `,
 ];

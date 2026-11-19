@@ -3,6 +3,7 @@ import { Id } from "./ids.js";
 import { ConversationId } from "./conversations.js";
 import { AuditLogEntry, Report } from "./moderation.js";
 import { Channel, Member, Message, Role, Server, VisibleStatus } from "./servers.js";
+import { VoiceState } from "./voice.js";
 
 /**
  * Gateway: the realtime WebSocket each client keeps open to its UserSession.
@@ -50,6 +51,8 @@ export const ServerSnapshot = z.object({
   channels: z.array(Channel),
   members: z.array(Member),
   presences: z.array(z.object({ userId: Id, status: VisibleStatus })),
+  /** Who is in a voice channel right now. Current state only, never history. */
+  voiceStates: z.array(VoiceState.extend({ channelId: Id, participantId: z.string() })),
 });
 export type ServerSnapshot = z.infer<typeof ServerSnapshot>;
 
@@ -78,6 +81,12 @@ export const EventPayloads = {
   MESSAGE_DELETE: MessageRef,
   PRESENCE_UPDATE: z.object({ serverId: Id, userId: Id, status: VisibleStatus }),
   TYPING_START: z.object({ serverId: Id, channelId: Id, userId: Id, at: z.number().int() }),
+  /**
+   * Someone joined, left, moved between or changed state in voice channels.
+   * `channelId: null` means they left. Only to members who can view the
+   * channel. Not replayed on resume: refetch GET /servers/:id/voice instead.
+   */
+  VOICE_STATE_UPDATE: VoiceState,
   /** Only to members who can manage messages in the report's channel. */
   REPORT_CREATE: Report,
   REPORT_UPDATE: Report,
@@ -101,7 +110,7 @@ export type GatewayEvent = {
 }[EventName];
 
 /** Events that are not kept for resume; missing one is harmless. */
-export const EPHEMERAL_EVENTS: ReadonlySet<EventName> = new Set(["TYPING_START"]);
+export const EPHEMERAL_EVENTS: ReadonlySet<EventName> = new Set(["TYPING_START", "VOICE_STATE_UPDATE"]);
 
 export const ReadyPayload = z.object({
   userId: Id,

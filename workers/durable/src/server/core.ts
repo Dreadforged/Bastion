@@ -17,7 +17,7 @@ import {
 import { schemas as s } from "@bastion/shared";
 import { takeToken, type Bucket, type Storage } from "../storage.js";
 import type { z } from "zod";
-import { READ_ONLY_OPS, ServerOp, type Reply } from "./ops.js";
+import { READ_ONLY_OPS, ServerOp, type Reply, type VoiceEffect } from "./ops.js";
 
 const P = Permission;
 
@@ -46,6 +46,8 @@ const RATE = {
   write: { burst: 30, perSecond: 0.5 },
   /** Reports: a few at once, then one a minute. */
   report: { burst: 3, perSecond: 1 / 60 },
+  /** Joining, leaving and state changes in voice. Heartbeats are one every 30 seconds. */
+  voice: { burst: 10, perSecond: 0.5 },
 } as const;
 
 /** Bucket key prefix for each limit. */
@@ -54,6 +56,7 @@ const RATE_KEY = new Map<object, string>([
   [RATE.typing, "t"],
   [RATE.write, "w"],
   [RATE.report, "r"],
+  [RATE.voice, "v"],
 ]);
 
 const ML = s.MODERATION_LIMITS;
@@ -157,6 +160,29 @@ interface AuditRow {
   created_at: number;
 }
 
+interface VoiceRow {
+  user_id: string;
+  channel_id: string;
+  room_id: string;
+  participant_id: string;
+  self_mute: number;
+  self_deaf: number;
+  streaming: number;
+  stream_blocked: number;
+  can_publish: number;
+  can_share: number;
+  plan: schemas.Plan;
+  expires_at: number;
+}
+
+const VOICE_COLUMNS = `s.user_id, s.channel_id, r.room_id, s.participant_id, s.self_mute, s.self_deaf, s.streaming,
+  s.stream_blocked, s.can_publish, s.can_share, s.plan, s.expires_at
+  FROM voice_states s JOIN voice_rooms r ON r.channel_id = s.channel_id`;
+
+function randomHex(): string {
+  return [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 interface OutboxRow {
   id: number;
   user_id: string;
@@ -225,6 +251,9 @@ export class ServerCore {
   private readonly buckets = new Map<string, Bucket>();
   private flushing = false;
   private flushAgain = false;
+  /** LiveKit changes the current operation needs, and the participants it already dealt with. */
+  private voiceFx: VoiceEffect[] = [];
+  private voiceHandled = new Set<string>();
 
   constructor(
     private readonly storage: Storage,
@@ -433,12 +462,16 @@ export class ServerCore {
       .toArray()
       .filter((p) => snap.members.has(p.user_id))
       .map((p) => ({ userId: p.user_id, status: this.visibleStatus(p.status) }));
+    const voiceStates = this.voiceRows()
+      .filter((v) => snap.members.has(v.user_id) && this.canView(snap, userId, v.channel_id))
+      .map((v) => this.voicePayload(snap.serverId, v) as schemas.ServerSnapshot["voiceStates"][number]);
     return {
       server: { id: server.id, name: server.name, ownerId: server.owner_id },
       roles: [...snap.roles.values()].sort((a, b) => a.position - b.position || a.id.localeCompare(b.id)).map((r) => this.rolePayload(snap, r)),
       channels: [...snap.channels.keys()].filter((c) => this.canView(snap, userId, c)).map((c) => this.channelPayload(snap, c)),
       members: [...snap.members.keys()].map((u) => this.memberPayload(snap, u)),
       presences,
+      voiceStates,
     };
   }
 
@@ -518,6 +551,7 @@ export class ServerCore {
    * next retry is due, or null when the outbox is empty.
    */
   async flush(): Promise<number | null> {
+    this.expireVoice();
     if (this.flushing) {
       this.flushAgain = true;
       return this.nextRetry();
@@ -539,7 +573,9 @@ export class ServerCore {
   /** When the next row is due, either after backoff or at the end of its batch window. */
   private nextRetry(): number | null {
     const row = this.sql.exec<{ next_at: number | null }>("SELECT MIN(MAX(next_at, ready_at)) AS next_at FROM outbox").toArray()[0];
-    return row?.next_at ?? null;
+    const lease = this.sql.exec<{ at: number | null }>("SELECT MIN(expires_at) AS at FROM voice_states").toArray()[0]?.at ?? null;
+    const times = [row?.next_at ?? null, lease].filter((t): t is number => t !== null);
+    return times.length === 0 ? null : Math.min(...times);
   }
 
   private async flushOnce(): Promise<boolean> {
@@ -718,7 +754,9 @@ export class ServerCore {
           ? RATE.typing
           : op.type === "report.create"
             ? RATE.report
-            : writes
+            : op.type.startsWith("voice.")
+              ? RATE.voice
+              : writes
               ? RATE.write
               : null;
     if (limit) {
@@ -746,6 +784,9 @@ export class ServerCore {
     try {
       // The change, its outbox rows and its stored reply commit together.
       reply = this.storage.transactionSync(() => {
+        this.voiceFx = [];
+        this.voiceHandled = new Set();
+        const before = writes ? this.voiceRows() : [];
         const result = this.run(userId, op, now);
         let r: Reply;
         if ("ephemeral" in result) {
@@ -754,6 +795,8 @@ export class ServerCore {
         } else {
           r = result;
         }
+        this.reconcileVoice(before);
+        if (this.voiceFx.length > 0) r.effects = { ...r.effects, voice: this.voiceFx };
         remember(r);
         return r;
       });
@@ -764,7 +807,7 @@ export class ServerCore {
     }
 
     if (pending.ephemeral) await this.sendEphemeral(pending.ephemeral.users, pending.ephemeral.ev);
-    if (writes) await this.flush();
+    if (writes || op.type === "voice.update") await this.flush();
     return reply;
   }
 
@@ -1173,6 +1216,47 @@ export class ServerCore {
       }
 
       // -------------------------------------------------- invites
+      case "channel.check": {
+        this.requireChannel(snap, userId, op.channelId, op.need === "view" ? P.VIEW_CHANNEL : P.ATTACH_FILES);
+        return { status: 204, body: null };
+      }
+
+      // -------------------------------------------------- voice
+      case "voice.join":
+        return this.voiceJoin(snap, userId, op, now);
+      case "voice.leave": {
+        const row = this.voiceRow(userId);
+        if (row) this.dropVoice(snap, row);
+        return { status: 204, body: null };
+      }
+      case "voice.update":
+        return this.voiceUpdate(snap, userId, op.body, now);
+      case "voice.list": {
+        const states = this.voiceRows()
+          .filter((v) => snap.members.has(v.user_id) && this.canView(snap, userId, v.channel_id))
+          .map((v) => this.voicePayload(snap.serverId, v));
+        return { status: 200, body: states };
+      }
+      case "voice.end_stream":
+      case "voice.disconnect": {
+        if (op.userId === userId) fail(400, "cannot_moderate_self");
+        this.requireModeration(snap, userId, op.userId, P.MUTE_MEMBERS);
+        const row = this.voiceRow(op.userId) ?? fail(404, "not_in_voice");
+        const audit = { targetId: op.userId, channelId: row.channel_id, reason: op.body.reason };
+        if (op.type === "voice.disconnect") {
+          this.dropVoice(snap, row);
+          this.audit(snap, userId, "voice.disconnect", audit);
+          return { status: 204, body: null };
+        }
+        this.sql.exec("UPDATE voice_states SET streaming = 0, stream_blocked = 1, can_share = 0 WHERE user_id = ?", op.userId);
+        this.voiceHandled.add(row.participant_id);
+        this.voiceFx.push({ kind: "restrict", roomId: row.room_id, participantId: row.participant_id, canPublish: row.can_publish === 1, canShare: false });
+        const updated = this.voiceRow(op.userId)!;
+        this.emitVoice(snap, this.voicePayload(snap.serverId, updated), [row.channel_id]);
+        this.audit(snap, userId, "voice.end_stream", audit);
+        return { status: 200, body: this.voicePayload(snap.serverId, updated) };
+      }
+
       case "invite.create": {
         this.requireBase(snap, userId, P.CREATE_INVITE);
         this.sql.exec("DELETE FROM invites WHERE expires_at IS NOT NULL AND expires_at <= ?", now);
@@ -1282,6 +1366,218 @@ export class ServerCore {
     }
   }
 
+  // ------------------------------------------------------------ voice
+
+  private voiceRows(): VoiceRow[] {
+    return this.sql.exec<VoiceRow>(`SELECT ${VOICE_COLUMNS} ORDER BY s.user_id`).toArray();
+  }
+
+  private voiceRow(userId: string): VoiceRow | undefined {
+    return this.sql.exec<VoiceRow>(`SELECT ${VOICE_COLUMNS} WHERE s.user_id = ?`, userId).toArray()[0];
+  }
+
+  private voicePayload(serverId: string, row: VoiceRow): schemas.VoiceState {
+    return {
+      serverId,
+      userId: row.user_id,
+      channelId: row.channel_id,
+      participantId: row.participant_id,
+      selfMute: row.self_mute === 1,
+      selfDeaf: row.self_deaf === 1,
+      streaming: row.streaming === 1,
+    };
+  }
+
+  /** Tell everyone who can view one of these channels. */
+  private emitVoice(snap: Snapshot, state: schemas.VoiceState, channelIds: string[], skipViewersOf?: string): void {
+    for (const channelId of channelIds) {
+      if (!snap.channels.has(channelId)) continue;
+      const users = this.viewers(snap, channelId).filter((u) => skipViewersOf === undefined || !this.canView(snap, u, skipViewersOf));
+      this.emit({ users, event: event("VOICE_STATE_UPDATE", state), channelId });
+    }
+  }
+
+  /**
+   * End someone's place in a call: forget it, tell the viewers of the channel
+   * and have LiveKit disconnect them.
+   */
+  private dropVoice(snap: Snapshot, row: VoiceRow, tell = true): void {
+    this.sql.exec("DELETE FROM voice_states WHERE user_id = ?", row.user_id);
+    this.sql.exec("DELETE FROM voice_rooms WHERE channel_id NOT IN (SELECT channel_id FROM voice_states)");
+    this.voiceHandled.add(row.participant_id);
+    this.voiceFx.push({ kind: "remove", roomId: row.room_id, participantId: row.participant_id });
+    if (!tell) return;
+    const left: schemas.VoiceState = {
+      serverId: snap.serverId,
+      userId: row.user_id,
+      channelId: null,
+      participantId: null,
+      selfMute: false,
+      selfDeaf: false,
+      streaming: false,
+    };
+    this.emitVoice(snap, left, [row.channel_id]);
+  }
+
+  /** The viewer cap of the weakest stream in a room, or null if nobody is streaming. */
+  private streamCap(streamers: VoiceRow[]): number | null {
+    if (streamers.length === 0) return null;
+    return Math.min(...streamers.map((v) => s.STREAM_QUALITY[v.plan].maxViewers));
+  }
+
+  /**
+   * Rooms with a live stream hold at most that stream's viewer limit of other
+   * people. LiveKit does not report who is watching, so everyone in the room
+   * who is not streaming counts, which keeps the cap safe.
+   */
+  private requireRoomFor(channelId: string, userId: string): void {
+    const others = this.voiceRows().filter((v) => v.channel_id === channelId && v.user_id !== userId);
+    const cap = this.streamCap(others.filter((v) => v.streaming === 1));
+    if (cap === null) return;
+    if (others.filter((v) => v.streaming === 0).length + 1 > cap) fail(409, "stream_full");
+  }
+
+  private voiceJoin(snap: Snapshot, userId: string, op: Extract<ServerOp, { type: "voice.join" }>, now: number): Reply {
+    const perms = this.requireChannel(snap, userId, op.channelId, P.CONNECT_VOICE);
+    if (snap.channels.get(op.channelId)!.kind !== "voice") fail(400, "not_voice_channel");
+    const canShare = has(perms, P.STREAM);
+    if (op.screenShare && !canShare) fail(403, "missing_permissions");
+
+    const existing = this.voiceRow(userId);
+    const refresh = existing?.channel_id === op.channelId;
+    if (existing?.stream_blocked === 1 && refresh && op.screenShare) fail(403, "stream_blocked");
+    if (!refresh) this.requireRoomFor(op.channelId, userId);
+    // Moving to another channel is leaving the old one.
+    if (existing && !refresh) this.dropVoice(snap, existing, false);
+
+    const room =
+      this.sql.exec<{ room_id: string }>("SELECT room_id FROM voice_rooms WHERE channel_id = ?", op.channelId).toArray()[0]?.room_id ?? randomHex();
+    this.sql.exec("INSERT OR IGNORE INTO voice_rooms (channel_id, room_id) VALUES (?, ?)", op.channelId, room);
+    const participantId = refresh ? existing!.participant_id : randomHex();
+    const canPublish = has(perms, P.SPEAK);
+    this.sql.exec(
+      `INSERT INTO voice_states (user_id, channel_id, participant_id, can_publish, can_share, plan, expires_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+       ON CONFLICT (user_id) DO UPDATE SET can_publish = ?4, can_share = (can_share OR ?5) AND NOT stream_blocked, plan = ?6, expires_at = ?7`,
+      userId,
+      op.channelId,
+      participantId,
+      canPublish ? 1 : 0,
+      op.screenShare ? 1 : 0,
+      op.plan,
+      now + s.VOICE_LIMITS.leaseSeconds * 1000,
+    );
+    const row = this.voiceRow(userId)!;
+    if (!refresh) {
+      const state = this.voicePayload(snap.serverId, row);
+      this.emitVoice(snap, state, [op.channelId]);
+      // People who could see the old channel but not this one need to hear that they left.
+      if (existing) {
+        const left: schemas.VoiceState = { ...state, channelId: null, participantId: null, streaming: false };
+        this.emitVoice(snap, left, [existing.channel_id], op.channelId);
+      }
+    }
+    return {
+      status: 200,
+      body: {
+        roomId: row.room_id,
+        participantId: row.participant_id,
+        canPublish: row.can_publish === 1,
+        canShare: row.can_share === 1,
+        quality: s.STREAM_QUALITY[row.plan],
+      },
+    };
+  }
+
+  private voiceUpdate(snap: Snapshot, userId: string, body: z.output<typeof s.UpdateVoiceStateRequest>, now: number): Reply {
+    const row = this.voiceRow(userId) ?? fail(409, "not_in_voice");
+    const perms = this.channelPermissions(snap, userId, row.channel_id);
+    let streaming = row.streaming === 1;
+    if (body.streaming === true && !streaming) {
+      if (!has(perms, P.STREAM)) fail(403, "missing_permissions");
+      if (row.stream_blocked === 1) fail(403, "stream_blocked");
+      // The new stream's cap must fit everyone already in the room.
+      const others = this.voiceRows().filter((v) => v.channel_id === row.channel_id && v.user_id !== userId);
+      const live = [...others.filter((v) => v.streaming === 1), row];
+      const viewers = others.filter((v) => v.streaming === 0).length;
+      if (viewers > this.streamCap(live)!) fail(409, "too_many_viewers");
+      streaming = true;
+    } else if (body.streaming === false) {
+      streaming = false;
+    }
+    const selfMute = body.selfMute ?? row.self_mute === 1;
+    const selfDeaf = body.selfDeaf ?? row.self_deaf === 1;
+    this.sql.exec(
+      "UPDATE voice_states SET self_mute = ?, self_deaf = ?, streaming = ?, can_share = ?, expires_at = ? WHERE user_id = ?",
+      selfMute ? 1 : 0,
+      selfDeaf ? 1 : 0,
+      streaming ? 1 : 0,
+      streaming ? 1 : row.can_share,
+      now + s.VOICE_LIMITS.leaseSeconds * 1000,
+      userId,
+    );
+    const updated = this.voiceRow(userId)!;
+    const changed = selfMute !== (row.self_mute === 1) || selfDeaf !== (row.self_deaf === 1) || streaming !== (row.streaming === 1);
+    const state = this.voicePayload(snap.serverId, updated);
+    if (changed) this.emitVoice(snap, state, [row.channel_id]);
+    return { status: 200, body: state };
+  }
+
+  /**
+   * After any change, check everyone in a call still has the right to be
+   * there: a timeout, kick, ban, role change, channel override or channel
+   * delete can all take it away. Those who lost it are removed (or, if only
+   * SPEAK or STREAM went, kept but cut from publishing).
+   */
+  private reconcileVoice(before: VoiceRow[]): void {
+    if (before.length === 0) return;
+    const snap = this.serverRow() === undefined ? null : this.load();
+    for (const old of before) {
+      if (this.voiceHandled.has(old.participant_id)) continue;
+      const row = this.voiceRow(old.user_id);
+      // Deleted along with its channel or server: only LiveKit needs telling.
+      if (!row || !snap || row.participant_id !== old.participant_id) {
+        this.voiceFx.push({ kind: "remove", roomId: old.room_id, participantId: old.participant_id });
+        continue;
+      }
+      const perms = this.channelPermissions(snap, row.user_id, row.channel_id);
+      if (!has(perms, P.VIEW_CHANNEL) || !has(perms, P.CONNECT_VOICE)) {
+        this.dropVoice(snap, row);
+        continue;
+      }
+      const stopShare = !has(perms, P.STREAM) && (row.can_share === 1 || row.streaming === 1);
+      const stopPublish = !has(perms, P.SPEAK) && row.can_publish === 1;
+      if (!stopShare && !stopPublish) continue;
+      const canPublish = stopPublish ? 0 : row.can_publish;
+      const canShare = stopShare ? 0 : row.can_share;
+      this.sql.exec(
+        "UPDATE voice_states SET can_publish = ?, can_share = ?, streaming = ? WHERE user_id = ?",
+        canPublish,
+        canShare,
+        stopShare ? 0 : row.streaming,
+        row.user_id,
+      );
+      this.voiceFx.push({ kind: "restrict", roomId: row.room_id, participantId: row.participant_id, canPublish: canPublish === 1, canShare: canShare === 1 });
+      if (stopShare && row.streaming === 1) {
+        this.emitVoice(snap, this.voicePayload(snap.serverId, this.voiceRow(row.user_id)!), [row.channel_id]);
+      }
+    }
+  }
+
+  /** Forget people whose clients stopped renewing, as a crashed client would. */
+  private expireVoice(): void {
+    const stale = this.sql.exec<VoiceRow>(`SELECT ${VOICE_COLUMNS} WHERE s.expires_at <= ?`, this.deps.now()).toArray();
+    if (stale.length === 0) return;
+    this.storage.transactionSync(() => {
+      this.voiceFx = [];
+      const snap = this.serverRow() ? this.load() : null;
+      for (const row of stale) {
+        if (snap) this.dropVoice(snap, row);
+        else this.sql.exec("DELETE FROM voice_states WHERE user_id = ?", row.user_id);
+      }
+    });
+  }
+
   private requireOverrideTarget(snap: Snapshot, userId: string, kind: "role" | "member", targetId: string): void {
     if (kind === "member") {
       if (!snap.members.has(targetId)) fail(404, "unknown_member");
@@ -1360,6 +1656,8 @@ export class ServerCore {
       "audit_log",
       "slow_mode",
       "timeouts",
+      "voice_states",
+      "voice_rooms",
       "messages",
       "channel_overrides",
       "channels",
