@@ -45,3 +45,6 @@ button.link { background: none; border: 0; padding: 0 .25rem; color: LinkText; t
 .call-alerts .ring { display: flex; gap: .35rem; align-items: center; flex-wrap: wrap; border: 1px solid highlight; border-radius: .5rem; padding: .4rem; }
 .call-alerts .notice { margin: 0; font-size: .85rem; }
 .content header.with-action { display: flex; justify-content: space-between; align-items: center; }
+.settings { padding: 1rem; overflow: auto; max-width: 40rem; }
+.settings h3 { margin: 1.25rem 0 .25rem; font-size: 1rem; }
+.settings .controls { display: flex; flex-wrap: wrap; gap: .5rem; }
