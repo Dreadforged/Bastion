@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { Id } from "./ids.js";
+import { ConversationId } from "./conversations.js";
 import { AuditLogEntry, Report } from "./moderation.js";
 import { Channel, Member, Message, Role, Server, VisibleStatus } from "./servers.js";
 
@@ -82,6 +83,11 @@ export const EventPayloads = {
   REPORT_UPDATE: Report,
   /** Only to members with VIEW_AUDIT_LOG. */
   AUDIT_LOG_ENTRY_CREATE: AuditLogEntry,
+  /**
+   * New items in an encrypted conversation, up to `seq`. Carries no content;
+   * clients fetch the envelopes. Also sent when the user is added.
+   */
+  CONVERSATION_UPDATE: z.object({ conversationId: ConversationId, seq: z.number().int().nonnegative() }),
 } as const;
 
 export type EventName = keyof typeof EventPayloads;
