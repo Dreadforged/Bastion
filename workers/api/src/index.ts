@@ -3,7 +3,12 @@ import { createEmailSender } from "./auth/email.js";
 import { simpleWebAuthn } from "./auth/passkeys.js";
 import { handleAuth, json } from "./auth/routes.js";
 import { handleConversations } from "./conversations/routes.js";
+import { NoopScanner } from "./files/scanner.js";
+import { R2S3Signer } from "./files/presign.js";
+import { cleanupPendingFiles, handleFiles } from "./files/routes.js";
+import { handleFileServe } from "./files/serve.js";
 import { cleanupInviteCodes, handleServers } from "./servers/routes.js";
+import { HttpLiveKitAdmin, type VoiceDeps } from "./voice/livekit.js";
 import type { Conversation, Server, UserSession } from "@bastion/durable";
 
 // Durable Object classes must be exported from the Worker entry.
@@ -25,6 +30,25 @@ export interface Env {
   AUTH_RATE_LIMIT?: RateLimit;
   /** Per-user limit for server, message and invite routes. Optional in local dev. */
   API_RATE_LIMIT?: RateLimit;
+  /** LiveKit server for voice: wss:// URL, API key and secret. Set the secret with `wrangler secret put`. */
+  LIVEKIT_URL?: string;
+  LIVEKIT_API_KEY?: string;
+  LIVEKIT_API_SECRET?: string;
+  /** Origin files are served from. Must be a different domain from the app and the API. */
+  FILES_ORIGIN?: string;
+  /** Signs download URLs. Secret. */
+  FILE_URL_SECRET?: string;
+  /** R2 S3 API credentials for pre-signed uploads. Secrets, except the account and bucket names. */
+  R2_ACCOUNT_ID?: string;
+  R2_ACCESS_KEY_ID?: string;
+  R2_SECRET_ACCESS_KEY?: string;
+  R2_BUCKET_NAME?: string;
+}
+
+function voiceDeps(env: Env): VoiceDeps | undefined {
+  if (!env.LIVEKIT_URL || !env.LIVEKIT_API_KEY || !env.LIVEKIT_API_SECRET) return undefined;
+  const config = { url: env.LIVEKIT_URL, apiKey: env.LIVEKIT_API_KEY, apiSecret: env.LIVEKIT_API_SECRET };
+  return { config, admin: new HttpLiveKitAdmin(config) };
 }
 
 export default {
@@ -34,6 +58,13 @@ export default {
 
     if (url.pathname === "/health") {
       return json({ ok: true, environment: env.ENVIRONMENT });
+    }
+
+    // The files domain only serves signed file URLs. Nothing else is reachable on it.
+    if (env.FILES_ORIGIN && env.FILE_URL_SECRET) {
+      const served = await handleFileServe(request, { db: env.DB, files: env.FILES, now: Date.now, filesOrigin: env.FILES_ORIGIN, urlSecret: env.FILE_URL_SECRET });
+      if (served) return served;
+      if (url.host === new URL(env.FILES_ORIGIN).host) return new Response(null, { status: 404 });
     }
 
     const auth = await handleAuth(
@@ -58,8 +89,30 @@ export default {
       now: Date.now,
       userLimit: env.API_RATE_LIMIT,
       revokeConversationAccess: (conversationId, userId) => conversation(conversationId).revoke([userId]),
+      voice: voiceDeps(env),
     });
     if (servers) return servers;
+
+    if (env.FILES_ORIGIN && env.FILE_URL_SECRET && env.R2_ACCOUNT_ID && env.R2_ACCESS_KEY_ID && env.R2_SECRET_ACCESS_KEY && env.R2_BUCKET_NAME) {
+      const files = await handleFiles(request, {
+        db: env.DB,
+        files: env.FILES,
+        servers: env.SERVER,
+        signer: new R2S3Signer({
+          accountId: env.R2_ACCOUNT_ID,
+          accessKeyId: env.R2_ACCESS_KEY_ID,
+          secretAccessKey: env.R2_SECRET_ACCESS_KEY,
+          bucket: env.R2_BUCKET_NAME,
+        }),
+        // Stub: lets everything through until a scanning service is chosen.
+        scanner: new NoopScanner(),
+        now: Date.now,
+        userLimit: env.API_RATE_LIMIT,
+        filesOrigin: env.FILES_ORIGIN,
+        urlSecret: env.FILE_URL_SECRET,
+      });
+      if (files) return files;
+    }
 
     const conversations = await handleConversations(request, {
       db: env.DB,
@@ -75,5 +128,6 @@ export default {
   async scheduled(_controller, env): Promise<void> {
     await cleanupExpired(env.DB, Date.now());
     await cleanupInviteCodes(env.DB, Date.now());
+    await cleanupPendingFiles(env.DB, env.FILES, Date.now());
   },
 } satisfies ExportedHandler<Env>;

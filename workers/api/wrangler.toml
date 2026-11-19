@@ -7,6 +7,10 @@ compatibility_flags = ["nodejs_compat"]
 # Replace the placeholder database ids after running `wrangler d1 create`.
 
 # ---------------------------------------------------------------- local dev
+# Voice and files are off until these are set (see docs/ops):
+#   vars:    LIVEKIT_URL, FILES_ORIGIN, R2_ACCOUNT_ID, R2_BUCKET_NAME
+#   secrets: LIVEKIT_API_KEY, LIVEKIT_API_SECRET, FILE_URL_SECRET,
+#            R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY   (wrangler secret put)
 [vars]
 ENVIRONMENT = "development"
 RP_ID = "localhost"
