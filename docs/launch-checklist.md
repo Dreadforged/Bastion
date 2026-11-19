@@ -44,7 +44,7 @@ security model.
 - [ ] Profiles or usernames so people are not shown as short ids.
 - [ ] Decision on encrypted backup for new devices (open question), or the "starts fresh" answer is accepted for alpha.
 - [ ] Moderation tools work on a real server: reports, timeouts, bans, audit log.
-- [ ] Internal admin tool for platform-level abuse behind Cloudflare Access with a hardware key, or a written manual process for the alpha.
+- [ ] Internal admin tool for platform-level abuse behind Cloudflare Access with a hardware key, or a written manual process for the alpha. The tool is built (`/staff`, off until `STAFF_ACCESS_TEAM_DOMAIN` and `STAFF_ACCESS_AUDIENCE` are set); the Access application and hardware-key policy are not created. It cannot view reports or evidence yet.
 
 ## 4. Claims rules (copy into every page, post and email before sending)
 
