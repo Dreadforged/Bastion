@@ -5,6 +5,7 @@ import type { z } from "zod";
 import { AuthError } from "../auth/errors.js";
 import { json } from "../auth/routes.js";
 import { authenticate, type Principal } from "../auth/sessions.js";
+import { body, HttpError, id, query } from "../http.js";
 
 export interface ServerRouteDeps {
   db: D1Database;
@@ -13,35 +14,6 @@ export interface ServerRouteDeps {
   now: () => number;
   /** Per-user request limit, keyed by user id. Optional in local dev. */
   userLimit?: RateLimit | undefined;
-}
-
-class HttpError extends Error {
-  constructor(
-    readonly status: number,
-    readonly code: string,
-  ) {
-    super(code);
-  }
-}
-
-async function body<T extends z.ZodType>(request: Request, schema: T): Promise<z.output<T>> {
-  const text = await request.text();
-  if (new TextEncoder().encode(text).length > schemas.LIMITS.maxBodyBytes) throw new HttpError(413, "body_too_large");
-  let value: unknown;
-  try {
-    value = text === "" ? {} : JSON.parse(text);
-  } catch {
-    throw new HttpError(400, "invalid_json");
-  }
-  const result = schema.safeParse(value);
-  if (!result.success) throw new HttpError(400, "invalid_request");
-  return result.data;
-}
-
-function id(value: string | undefined): string {
-  const result = Id.safeParse(value);
-  if (!result.success) throw new HttpError(404, "not_found");
-  return result.data;
 }
 
 function inviteCode(value: string | undefined): string {
@@ -55,13 +27,6 @@ function idempotencyKey(request: Request): string | null {
   if (value === null) return null;
   const result = schemas.IdempotencyKey.safeParse(value);
   if (!result.success) throw new HttpError(400, "invalid_idempotency_key");
-  return result.data;
-}
-
-function query<T extends z.ZodType>(request: Request, schema: T): z.output<T> {
-  const params = Object.fromEntries(new URL(request.url).searchParams);
-  const result = schema.safeParse(params);
-  if (!result.success) throw new HttpError(400, "invalid_request");
   return result.data;
 }
 
