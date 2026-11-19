@@ -9,10 +9,10 @@ import { ApiError, newIdempotencyKey, type Api } from "./http.js";
  * crate's WASM build; this file keeps that device's groups in step with the
  * server's delivery service (conversations, commits, welcomes, envelopes).
  *
- * Limits of what exists today, all inherited from the crypto crate:
- *  - Group state lives in memory only. A reload loses it, so a conversation
- *    that was opened before the reload can't be read after it.
- *  - Members can be added but not removed, and a rejected commit can't be rolled back.
+ * Group state survives reloads: after every epoch change, send and receive
+ * the MLS state (plus the cursors and message log kept here) is handed to
+ * `persist`, which stores it encrypted (see vault.ts). A message is saved
+ * before it is posted so a crash can never reuse a ratchet generation.
  */
 
 export interface MlsIncoming {
@@ -32,6 +32,12 @@ export interface MlsClient {
   encrypt(groupId: Uint8Array, content: Uint8Array): Uint8Array;
   receive(groupId: Uint8Array, bytes: Uint8Array): MlsIncoming;
   epoch(groupId: Uint8Array): number;
+  removeMembers(groupId: Uint8Array, identities: Uint8Array[]): { commit: Uint8Array; welcome: Uint8Array | undefined };
+  updateKeys(groupId: Uint8Array): { commit: Uint8Array; welcome: Uint8Array | undefined };
+  commitRejected(groupId: Uint8Array): void;
+  members(groupId: Uint8Array): Uint8Array[];
+  inGroup(groupId: Uint8Array): boolean;
+  saveState(): Uint8Array;
 }
 
 /** The generated bindings, which return objects that must be freed. */
@@ -45,6 +51,12 @@ interface WasmModuleClient {
   encrypt(g: Uint8Array, c: Uint8Array): Uint8Array;
   receive(g: Uint8Array, b: Uint8Array): { kind: string; content: Uint8Array; sender: Uint8Array; free(): void };
   epoch(g: Uint8Array): number;
+  removeMembers(g: Uint8Array, ids: Uint8Array[]): { commit: Uint8Array; welcome: Uint8Array | undefined; free(): void };
+  updateKeys(g: Uint8Array): { commit: Uint8Array; welcome: Uint8Array | undefined; free(): void };
+  commitRejected(g: Uint8Array): void;
+  members(g: Uint8Array): Uint8Array[];
+  inGroup(g: Uint8Array): boolean;
+  saveState(): Uint8Array;
 }
 
 export function adaptWasmClient(raw: WasmModuleClient): MlsClient {
@@ -68,7 +80,48 @@ export function adaptWasmClient(raw: WasmModuleClient): MlsClient {
       return result;
     },
     epoch: (g) => raw.epoch(g),
+    removeMembers(g, ids) {
+      const out = raw.removeMembers(g, ids);
+      const result = { commit: out.commit, welcome: out.welcome };
+      out.free();
+      return result;
+    },
+    updateKeys(g) {
+      const out = raw.updateKeys(g);
+      const result = { commit: out.commit, welcome: out.welcome };
+      out.free();
+      return result;
+    },
+    commitRejected: (g) => raw.commitRejected(g),
+    members: (g) => raw.members(g),
+    inGroup: (g) => raw.inGroup(g),
+    saveState: () => raw.saveState(),
   };
+}
+
+/** What this layer keeps next to the MLS state so a reload picks up where it stopped. */
+export interface PersistedMeta {
+  cursor: [string, number][];
+  channelConv: [string, string][];
+  sent: [string, MessagePayload][];
+  log: [string, DecryptedMessage[]][];
+}
+
+const BUNDLE_VERSION = 1;
+const KEEP_SENT = 5000;
+const KEEP_LOG = 1000;
+
+export function encodeBundle(mls: Uint8Array, meta: PersistedMeta): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify({ v: BUNDLE_VERSION, mls: toB64(mls), meta }));
+}
+
+/** Throws if the bytes are not a bundle this version wrote. */
+export function decodeBundle(bytes: Uint8Array): { mls: Uint8Array; meta: PersistedMeta } {
+  const raw = JSON.parse(new TextDecoder().decode(bytes)) as { v?: number; mls?: string; meta?: PersistedMeta };
+  if (raw.v !== BUNDLE_VERSION || typeof raw.mls !== "string" || !raw.meta) throw new Error("bundle_unsupported");
+  const { cursor, channelConv, sent, log } = raw.meta;
+  if (![cursor, channelConv, sent, log].every(Array.isArray)) throw new Error("bundle_unsupported");
+  return { mls: fromB64(raw.mls), meta: raw.meta };
 }
 
 export function toB64(bytes: Uint8Array): string {
@@ -111,6 +164,11 @@ export interface E2eeOptions {
   deviceId: string;
   mls: MlsClient;
   now?: () => number;
+  /** Where to put the encrypted-at-rest state bundle. Omit to keep nothing. */
+  persist?: (bundle: Uint8Array) => Promise<void>;
+  /** What `decodeBundle` returned for this device, if anything was saved. */
+  restored?: PersistedMeta;
+  onPersistError?: (err: unknown) => void;
 }
 
 /** What `sync` found. */
@@ -128,11 +186,56 @@ export interface SyncResult {
 export class E2ee {
   /** Highest envelope seq applied per conversation. */
   private readonly cursor = new Map<string, number>();
-  private readonly known = new Set<string>();
+  private readonly channelConv = new Map<string, string>();
+  private readonly sent = new Map<string, MessagePayload>();
   private readonly log = new Map<string, DecryptedMessage[]>();
   private readonly syncing = new Map<string, Promise<SyncResult>>();
+  private saving: Promise<void> = Promise.resolve();
+  private closed = false;
 
-  constructor(private readonly o: E2eeOptions) {}
+  constructor(private readonly o: E2eeOptions) {
+    const r = o.restored;
+    if (r) {
+      for (const [k, v] of r.cursor) this.cursor.set(k, v);
+      for (const [k, v] of r.channelConv) this.channelConv.set(k, v);
+      for (const [k, v] of r.sent) this.sent.set(k, v);
+      for (const [k, v] of r.log) this.log.set(k, v);
+    }
+  }
+
+  private isKnown(conversationId: string): boolean {
+    return this.o.mls.inGroup(this.groupId(conversationId));
+  }
+
+  private snapshot(): Uint8Array {
+    const meta: PersistedMeta = {
+      cursor: [...this.cursor],
+      channelConv: [...this.channelConv],
+      sent: [...this.sent].slice(-KEEP_SENT),
+      log: [...this.log].map(([k, v]) => [k, v.slice(-KEEP_LOG)]),
+    };
+    return encodeBundle(this.o.mls.saveState(), meta);
+  }
+
+  /** Save now. Saves queue up so they never overlap; a failure is reported, not thrown. */
+  private persist(): Promise<void> {
+    if (!this.o.persist || this.closed) return Promise.resolve();
+    const persist = this.o.persist;
+    const run = this.saving.then(() => persist(this.snapshot()));
+    this.saving = run.catch((err) => this.o.onPersistError?.(err));
+    return this.saving;
+  }
+
+  /** Stop saving (sign-out). Saves already queued finish first, so the caller can then wipe storage. */
+  close(): Promise<void> {
+    this.closed = true;
+    return this.saving;
+  }
+
+  /** Resolves when every save requested so far has finished. */
+  flush(): Promise<void> {
+    return this.saving;
+  }
 
   /** Publish this device's identity key and top up key packages. Call after sign-in. */
   async publishKeys(): Promise<void> {
@@ -142,6 +245,8 @@ export class E2ee {
     // Each package is single use, so make a fresh batch.
     for (let i = 0; i < KEY_PACKAGE_BATCH; i++) keyPackages.push(toB64(this.o.mls.keyPackage()));
     await this.o.api.post("/keys/packages", { identityKey: toB64(this.o.mls.identityKey()), keyPackages });
+    // The private halves of those key packages live in the MLS state.
+    await this.persist();
   }
 
   messages(conversationId: string): DecryptedMessage[] {
@@ -159,7 +264,7 @@ export class E2ee {
       { kind: "dm", userId: peerId },
       { idempotencyKey: newIdempotencyKey() },
     );
-    if (this.known.has(conv.id)) return conv;
+    if (this.isKnown(conv.id)) return conv;
     // A fresh conversation has only its creator's device in it, at epoch 0.
     const fresh = conv.epoch === 0 && conv.devices.length === 1 && conv.devices[0]!.deviceId === this.o.deviceId;
     if (fresh) await this.createAndInvite(conv.id, [peerId, this.o.userId]);
@@ -170,7 +275,7 @@ export class E2ee {
   /** Make the group, then add every device of `userIds` (and our own other devices). */
   private async createAndInvite(conversationId: string, userIds: string[]): Promise<void> {
     this.o.mls.createGroup(this.groupId(conversationId));
-    this.known.add(conversationId);
+    await this.persist();
     await this.invite(conversationId, userIds, []);
   }
 
@@ -189,23 +294,109 @@ export class E2ee {
       exhausted += r.exhausted.filter((d) => !inGroup.has(d.deviceId)).length;
     }
     for (const pkg of keyPackages) {
-      const epoch = this.o.mls.epoch(gid);
-      const out = this.o.mls.addMember(gid, fromB64(pkg.keyPackage));
+      await this.publishCommit(
+        conversationId,
+        () => this.o.mls.addMember(gid, fromB64(pkg.keyPackage)),
+        [{ userId: pkg.userId, deviceId: pkg.deviceId }],
+        [],
+      );
+    }
+    // Devices with no key packages left can't be added yet; their owner's client will top up.
+    if (exhausted > 0) throw new Error("key_packages_exhausted");
+  }
+
+  /**
+   * Send one commit and apply it once the server accepts it. If the server
+   * refuses (stale epoch, no access) the pending commit is rolled back so
+   * the group is exactly where it was, and the error goes to the caller.
+   */
+  private async publishCommit(
+    conversationId: string,
+    build: () => { commit: Uint8Array; welcome: Uint8Array | undefined },
+    adds: schemas.DeviceRef[],
+    removes: schemas.DeviceRef[],
+  ): Promise<void> {
+    const gid = this.groupId(conversationId);
+    const epoch = this.o.mls.epoch(gid);
+    const out = build();
+    try {
       await this.o.api.post(
         `/conversations/${conversationId}/commits`,
         {
           epoch,
           commit: toB64(out.commit),
           ...(out.welcome ? { welcome: toB64(out.welcome) } : {}),
-          adds: [{ userId: pkg.userId, deviceId: pkg.deviceId }],
-          removes: [],
+          adds,
+          removes,
         },
         { idempotencyKey: newIdempotencyKey() },
       );
-      this.o.mls.commitAccepted(gid);
+    } catch (err) {
+      this.o.mls.commitRejected(gid);
+      await this.persist();
+      throw err;
     }
-    // Devices with no key packages left can't be added yet; their owner's client will top up.
-    if (exhausted > 0) throw new Error("key_packages_exhausted");
+    this.o.mls.commitAccepted(gid);
+    await this.persist();
+  }
+
+  /** Every other device in the group that `pick` accepts, with its MLS identity. */
+  private groupDevices(conversationId: string, pick: (ref: schemas.DeviceRef) => boolean) {
+    const dec = new TextDecoder();
+    const found: { ref: schemas.DeviceRef; identity: Uint8Array }[] = [];
+    for (const identity of this.o.mls.members(this.groupId(conversationId))) {
+      const text = dec.decode(identity);
+      const slash = text.indexOf("/");
+      if (slash <= 0) continue;
+      const ref = { userId: text.slice(0, slash), deviceId: text.slice(slash + 1) };
+      if (ref.deviceId === this.o.deviceId) continue;
+      if (pick(ref)) found.push({ ref, identity });
+    }
+    return found;
+  }
+
+  /** Remove all of one person's devices from a conversation in a single commit. */
+  async removeMember(conversationId: string, userId: string): Promise<void> {
+    await this.removeDevices(
+      conversationId,
+      this.groupDevices(conversationId, (d) => d.userId === userId),
+    );
+  }
+
+  private async removeDevices(conversationId: string, devices: { ref: schemas.DeviceRef; identity: Uint8Array }[]): Promise<void> {
+    if (devices.length === 0) return;
+    const gid = this.groupId(conversationId);
+    await this.publishCommit(
+      conversationId,
+      () => this.o.mls.removeMembers(gid, devices.map((d) => d.identity)),
+      [],
+      devices.map((d) => d.ref),
+    );
+  }
+
+  /**
+   * The server refused a send because people or devices lost access
+   * (`rotation_required`). Remove them so the group's keys change, then the
+   * caller can retry.
+   */
+  async removeRevoked(conversationId: string, body: { userIds?: string[]; deviceIds?: string[] }): Promise<void> {
+    const users = new Set(body.userIds ?? []);
+    const devices = new Set(body.deviceIds ?? []);
+    await this.removeDevices(
+      conversationId,
+      this.groupDevices(conversationId, (d) => users.has(d.userId) || devices.has(d.deviceId)),
+    );
+  }
+
+  /** Rotate this device's keys in a conversation (post-compromise healing). */
+  async rotateKeys(conversationId: string): Promise<void> {
+    const gid = this.groupId(conversationId);
+    await this.publishCommit(conversationId, () => this.o.mls.updateKeys(gid), [], []);
+  }
+
+  /** The conversation behind a channel, if this device has opened it. */
+  channelConversation(channelId: string): string | undefined {
+    return this.channelConv.get(channelId);
   }
 
   /** Fetch and apply everything new in a conversation. Concurrent calls share one run. */
@@ -222,6 +413,7 @@ export class E2ee {
     const gid = this.groupId(conversationId);
     const found: DecryptedMessage[] = [];
     let removed = false;
+    try {
     for (;;) {
       const after = this.cursor.get(conversationId) ?? 0;
       const { envelopes } = await this.o.api.get<{ envelopes: schemas.Envelope[] }>(`/conversations/${conversationId}/envelopes`, {
@@ -234,11 +426,8 @@ export class E2ee {
         const own = env.senderDeviceId === this.o.deviceId;
         try {
           if (env.kind === "welcome") {
-            if (!this.known.has(conversationId)) {
-              this.o.mls.join(fromB64(env.data));
-              this.known.add(conversationId);
-            }
-          } else if (!own && this.known.has(conversationId)) {
+            if (!this.isKnown(conversationId)) this.o.mls.join(fromB64(env.data));
+          } else if (!own && this.isKnown(conversationId)) {
             const incoming = this.o.mls.receive(gid, fromB64(env.data));
             if (incoming.kind === "removed") removed = true;
             else if (incoming.kind === "message") {
@@ -261,6 +450,10 @@ export class E2ee {
       }
       if (envelopes.length < 100) break;
     }
+    } finally {
+      // Group state, cursor and log move together, so a reload replays nothing twice.
+      await this.persist();
+    }
     return { messages: found, removed };
   }
 
@@ -274,9 +467,11 @@ export class E2ee {
   /** Encrypt and send. Retries reuse the same idempotency key, so a flaky network can't double-send. */
   async send(conversationId: string, text: string): Promise<DecryptedMessage> {
     const gid = this.groupId(conversationId);
-    if (!this.known.has(conversationId)) throw new Error("conversation_not_ready");
+    if (!this.isKnown(conversationId)) throw new Error("conversation_not_ready");
     const payload = MessagePayload.parse({ text });
     const ciphertext = this.o.mls.encrypt(gid, new TextEncoder().encode(JSON.stringify(payload)));
+    // Save the advanced ratchet before the ciphertext leaves, or a crash could reuse its key.
+    await this.persist();
     const key = newIdempotencyKey();
     const body = { epoch: this.o.mls.epoch(gid), ciphertext: toB64(ciphertext) };
     const { seq } = await this.o.api.post<{ seq: number }>(`/conversations/${conversationId}/messages`, body, {
@@ -291,13 +486,11 @@ export class E2ee {
       payload,
     };
     this.remember(conversationId, message);
+    await this.persist();
     return message;
   }
 
   // ------------------------------------------------------------ server channels
-
-  private readonly channelConv = new Map<string, string>();
-  private readonly sent = new Map<string, MessagePayload>();
 
   /**
    * Make this device ready to read and write an encrypted channel. The first
@@ -322,8 +515,9 @@ export class E2ee {
         id = existing;
       }
       this.channelConv.set(channelId, id);
+      await this.persist();
     }
-    if (conv && !this.known.has(id)) {
+    if (conv && !this.isKnown(id)) {
       const fresh = conv.epoch === 0 && conv.devices.length === 1 && conv.devices[0]!.deviceId === this.o.deviceId;
       if (fresh) {
         await this.createAndInvite(id, memberIds);
@@ -331,19 +525,21 @@ export class E2ee {
       }
     }
     await this.sync(id);
-    if (this.known.has(id)) {
+    if (this.isKnown(id)) {
       const view = await this.o.api.get<schemas.Conversation>(`/conversations/${id}`);
       await this.invite(id, memberIds, view.devices);
     }
   }
 
   /** Encrypt for a channel; the caller posts the result to the server's message route. */
-  encryptForChannel(channelId: string, text: string): { ciphertext: string; epoch: number; payload: MessagePayload } {
+  async encryptForChannel(channelId: string, text: string): Promise<{ ciphertext: string; epoch: number; payload: MessagePayload }> {
     const id = this.channelConv.get(channelId);
-    if (!id || !this.known.has(id)) throw new Error("conversation_not_ready");
+    if (!id || !this.isKnown(id)) throw new Error("conversation_not_ready");
     const gid = this.groupId(id);
     const payload = MessagePayload.parse({ text });
     const bytes = this.o.mls.encrypt(gid, new TextEncoder().encode(JSON.stringify(payload)));
+    // Save the advanced ratchet before the ciphertext leaves.
+    await this.persist();
     return { ciphertext: toB64(bytes), epoch: this.o.mls.epoch(gid), payload };
   }
 
@@ -357,7 +553,7 @@ export class E2ee {
     const own = this.sent.get(message.id);
     if (own) return own;
     const id = this.channelConv.get(message.channelId);
-    if (!id || !this.known.has(id)) return null;
+    if (!id || !this.isKnown(id)) return null;
     await this.sync(id);
     try {
       const incoming = this.o.mls.receive(this.groupId(id), fromB64(message.ciphertext));
@@ -367,6 +563,9 @@ export class E2ee {
       return payload;
     } catch {
       return null;
+    } finally {
+      // Receiving advances the ratchet even when the message turns out unreadable.
+      await this.persist();
     }
   }
 }

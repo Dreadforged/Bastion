@@ -116,6 +116,7 @@ export class FakeDelivery {
         if (body.epoch !== conv.epoch) return this.reply(409, { error: "stale_epoch", epoch: conv.epoch });
         const seq = this.push(conv, { kind: "commit", senderId: userId, senderDeviceId: deviceId, epoch: body.epoch, data: body.commit });
         conv.epoch++;
+        for (const rm of (body.removes ?? []) as { deviceId: string }[]) conv.devices = conv.devices.filter((d) => d.deviceId !== rm.deviceId);
         for (const add of body.adds as { userId: string; deviceId: string }[]) {
           conv.devices.push(add);
           this.push(conv, { kind: "welcome", senderId: userId, senderDeviceId: deviceId, epoch: conv.epoch, data: body.welcome, to: add.deviceId });

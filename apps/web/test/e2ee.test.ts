@@ -95,7 +95,7 @@ describe.skipIf(!built)("E2ee over the crypto crate", () => {
 
     // Alice (a channel manager) sets the group up and adds Bob's device.
     await alice.openChannel("S1", "C1", ["ALICE", "BOB"]);
-    const sent = alice.encryptForChannel("C1", "channel hello");
+    const sent = await alice.encryptForChannel("C1", "channel hello");
     alice.rememberSent("M1", sent.payload);
     expect(sent.ciphertext).not.toContain("channel");
 
