@@ -4,7 +4,11 @@ Bastion is an open source, privacy-first chat and community platform by
 Dreadforged Studios. Messages are end-to-end encrypted with MLS; the server
 only relays ciphertext.
 
-> Status: early scaffold. Nothing here is usable yet.
+> Status: pre-alpha. Accounts, servers, text, moderation, encrypted DMs and
+> channels, voice, files, and a web client are written and tested in isolation.
+> Nothing has been deployed, and the encryption code has not had its outside
+> review yet. Do not rely on it for anything private. See
+> `docs/launch-checklist.md` and `docs/foundations-check.md`.
 
 ## Layout
 
@@ -14,12 +18,13 @@ workers/
   durable/    Durable Objects: UserSession, Server, Conversation (WebSocket Hibernation)
   shared/     Types, zod schemas, ULIDs and the permissions bitmask (client + server)
 crates/
-  crypto/     bastion-crypto: Rust encryption core (OpenMLS, compiled to WASM). Stub.
+  crypto/     bastion-crypto: Rust encryption core (OpenMLS, compiled to WASM)
 apps/
   web/        React + TypeScript + Vite client
   desktop/    Tauri shell around the web client. Stub.
 docs/
   threat-model.md
+  launch-checklist.md, foundations-check.md, encryption-review-brief.md, privacy-notes.md
   adr/        Architecture decision records
 ```
 
@@ -29,7 +34,7 @@ docs/
 - Storage: D1 for accounts, R2 for files.
 - Validation: zod schemas shared by client and server.
 - Encryption: Rust (OpenMLS) compiled to WASM.
-- Voice (later): LiveKit media servers.
+- Voice: self-hosted LiveKit media servers (end-to-end encrypted frames).
 
 ## Getting started
 
