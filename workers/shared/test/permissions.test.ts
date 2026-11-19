@@ -7,6 +7,7 @@ import {
   has,
   parsePermissions,
   serializePermissions,
+  TIMEOUT_ALLOWED,
   type PermissionContext,
 } from "../src/permissions.js";
 
@@ -163,5 +164,36 @@ describe("channel override edge cases", () => {
       ctx({ channel: { everyone: { allow: 1n << 70n, deny: 0n } } }),
     );
     expect(perms < 1n << 64n).toBe(true);
+  });
+});
+
+describe("timeouts", () => {
+  const everything = { id: "everyone", permissions: ALL_PERMISSIONS & ~P.ADMINISTRATOR };
+
+  it("leave a timed-out member able to read only", () => {
+    const perms = computeBasePermissions(ctx({ everyoneRole: everything, timedOut: true }));
+    expect(perms).toBe(TIMEOUT_ALLOWED);
+    for (const flag of [P.SEND_MESSAGES, P.CONNECT_VOICE, P.SPEAK, P.CREATE_INVITE, P.KICK, P.BAN, P.TIMEOUT]) {
+      expect(has(perms, flag)).toBe(false);
+    }
+  });
+
+  it("apply after channel overrides, so an allow cannot undo them", () => {
+    const channel = { members: { user: { allow: P.SEND_MESSAGES | P.CONNECT_VOICE, deny: 0n } } };
+    const perms = computePermissions(ctx({ channel, timedOut: true }));
+    expect(has(perms, P.VIEW_CHANNEL)).toBe(true);
+    expect(has(perms, P.SEND_MESSAGES)).toBe(false);
+    expect(has(perms, P.CONNECT_VOICE)).toBe(false);
+  });
+
+  it("do not give back a channel the member could not see", () => {
+    const channel = { everyone: { allow: 0n, deny: P.VIEW_CHANNEL } };
+    expect(computePermissions(ctx({ channel, timedOut: true }))).toBe(0n);
+  });
+
+  it("do not apply to the owner or administrators", () => {
+    expect(computeBasePermissions(ctx({ userId: "owner", timedOut: true }))).toBe(ALL_PERMISSIONS);
+    const admin = { id: "admin", permissions: P.ADMINISTRATOR };
+    expect(computePermissions(ctx({ memberRoles: [admin], timedOut: true, channel: {} }))).toBe(ALL_PERMISSIONS);
   });
 });

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { Id } from "./ids.js";
+import { AuditLogEntry, Report } from "./moderation.js";
 import { Channel, Member, Message, Role, Server, VisibleStatus } from "./servers.js";
 
 /**
@@ -76,6 +77,11 @@ export const EventPayloads = {
   MESSAGE_DELETE: MessageRef,
   PRESENCE_UPDATE: z.object({ serverId: Id, userId: Id, status: VisibleStatus }),
   TYPING_START: z.object({ serverId: Id, channelId: Id, userId: Id, at: z.number().int() }),
+  /** Only to members who can manage messages in the report's channel. */
+  REPORT_CREATE: Report,
+  REPORT_UPDATE: Report,
+  /** Only to members with VIEW_AUDIT_LOG. */
+  AUDIT_LOG_ENTRY_CREATE: AuditLogEntry,
 } as const;
 
 export type EventName = keyof typeof EventPayloads;
