@@ -103,6 +103,67 @@ impl WasmClient {
         })
     }
 
+    /// Removes the members whose identities are listed (array of Uint8Array).
+    #[wasm_bindgen(js_name = removeMembers)]
+    pub fn remove_members(
+        &mut self,
+        group_id: &[u8],
+        identities: Vec<js_sys::Uint8Array>,
+    ) -> Result<WasmCommit, JsError> {
+        let ids: Vec<Vec<u8>> = identities.iter().map(|i| i.to_vec()).collect();
+        let out = self.inner.remove_members(group_id, &ids).map_err(js_err)?;
+        Ok(WasmCommit {
+            commit: out.commit,
+            welcome: out.welcome,
+        })
+    }
+
+    /// Rotates this device's keys in the group.
+    #[wasm_bindgen(js_name = updateKeys)]
+    pub fn update_keys(&mut self, group_id: &[u8]) -> Result<WasmCommit, JsError> {
+        let out = self.inner.update_keys(group_id).map_err(js_err)?;
+        Ok(WasmCommit {
+            commit: out.commit,
+            welcome: out.welcome,
+        })
+    }
+
+    /// Drops a pending commit the server rejected.
+    #[wasm_bindgen(js_name = commitRejected)]
+    pub fn commit_rejected(&mut self, group_id: &[u8]) -> Result<(), JsError> {
+        self.inner.commit_rejected(group_id).map_err(js_err)
+    }
+
+    /// Identities of the group's members, as an array of Uint8Array.
+    pub fn members(&mut self, group_id: &[u8]) -> Result<Vec<js_sys::Uint8Array>, JsError> {
+        Ok(self
+            .inner
+            .members(group_id)
+            .map_err(js_err)?
+            .iter()
+            .map(|m| js_sys::Uint8Array::from(m.as_slice()))
+            .collect())
+    }
+
+    #[wasm_bindgen(js_name = inGroup)]
+    pub fn in_group(&self, group_id: &[u8]) -> bool {
+        self.inner.in_group(group_id)
+    }
+
+    /// Serializes all device state. SECRET: encrypt before storing.
+    #[wasm_bindgen(js_name = saveState)]
+    pub fn save_state(&self) -> Result<Vec<u8>, JsError> {
+        self.inner.save_state().map_err(js_err)
+    }
+
+    /// Restores a device from `saveState` output.
+    #[wasm_bindgen(js_name = loadState)]
+    pub fn load_state(bytes: &[u8]) -> Result<WasmClient, JsError> {
+        Ok(Self {
+            inner: Client::load_state(bytes).map_err(js_err)?,
+        })
+    }
+
     #[wasm_bindgen(js_name = commitAccepted)]
     pub fn commit_accepted(&mut self, group_id: &[u8]) -> Result<(), JsError> {
         self.inner.commit_accepted(group_id).map_err(js_err)

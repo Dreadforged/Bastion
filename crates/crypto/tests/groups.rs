@@ -146,3 +146,63 @@ fn unknown_member_removal_fails() {
     let mut c = group_of(&["alice", "bob"]);
     assert!(c[0].remove_members(GROUP, &[b"mallory".to_vec()]).is_err());
 }
+
+#[test]
+fn state_survives_save_and_load() {
+    let mut c = group_of(&["alice", "bob"]);
+    let ct = c[0].encrypt(GROUP, b"before reload").unwrap();
+    assert_eq!(
+        c[1].receive(GROUP, &ct).unwrap(),
+        msg("alice", "before reload")
+    );
+
+    let saved = c[1].save_state().unwrap();
+    let mut bob = Client::load_state(&saved).unwrap();
+    assert!(bob.in_group(GROUP));
+    assert_eq!(bob.identity_key(), c[1].identity_key());
+    assert_eq!(bob.epoch(GROUP).unwrap(), c[0].epoch(GROUP).unwrap());
+
+    // The reloaded device keeps talking to the live one, both ways.
+    let ct = c[0].encrypt(GROUP, b"after reload").unwrap();
+    assert_eq!(
+        bob.receive(GROUP, &ct).unwrap(),
+        msg("alice", "after reload")
+    );
+    let ct = bob.encrypt(GROUP, b"hi alice").unwrap();
+    assert_eq!(c[0].receive(GROUP, &ct).unwrap(), msg("bob", "hi alice"));
+}
+
+#[test]
+fn pending_commit_survives_reload() {
+    let mut c = group_of(&["alice", "bob"]);
+    let epoch = c[0].epoch(GROUP).unwrap();
+    c[0].update_keys(GROUP).unwrap();
+    let mut alice = Client::load_state(&c[0].save_state().unwrap()).unwrap();
+    alice.commit_rejected(GROUP).unwrap();
+    assert_eq!(alice.epoch(GROUP).unwrap(), epoch);
+    let ct = alice.encrypt(GROUP, b"still fine").unwrap();
+    assert_eq!(
+        c[1].receive(GROUP, &ct).unwrap(),
+        msg("alice", "still fine")
+    );
+}
+
+#[test]
+fn removed_group_stays_gone_after_reload() {
+    let mut c = group_of(&["alice", "bob"]);
+    let out = c[0].remove_members(GROUP, &[b"bob".to_vec()]).unwrap();
+    c[0].commit_accepted(GROUP).unwrap();
+    assert_eq!(c[1].receive(GROUP, &out.commit).unwrap(), Incoming::Removed);
+    let bob = Client::load_state(&c[1].save_state().unwrap()).unwrap();
+    assert!(!bob.in_group(GROUP));
+}
+
+#[test]
+fn bad_state_is_rejected() {
+    let c = Client::new(b"alice").unwrap();
+    let mut saved = c.save_state().unwrap();
+    assert!(Client::load_state(&saved[..saved.len() - 1]).is_err());
+    saved[0] ^= 1;
+    assert!(Client::load_state(&saved).is_err());
+    assert!(Client::load_state(b"").is_err());
+}
