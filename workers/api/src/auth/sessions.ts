@@ -68,7 +68,12 @@ export async function authenticate(db: D1Database, request: Request, now: number
  * Rotate a refresh token. Each refresh token works once. Presenting one that
  * was already rotated means it leaked, so the whole session is revoked.
  */
-export async function refresh(db: D1Database, refreshToken: string, now: number): Promise<schemas.SessionTokens> {
+export async function refresh(
+  db: D1Database,
+  refreshToken: string,
+  now: number,
+  onRevoked?: (ended: { userId: string; sessionId: string }[]) => Promise<void>,
+): Promise<schemas.SessionTokens> {
   const oldHash = await hashToken(refreshToken);
   const { tokens, accessHash, refreshHash } = await issue(now);
 
@@ -88,10 +93,11 @@ export async function refresh(db: D1Database, refreshToken: string, now: number)
   }
 
   // Unknown, expired, or reused. Revoke anything it points at.
-  await db
-    .prepare("DELETE FROM sessions WHERE refresh_hash = ?1 OR previous_refresh_hash = ?1")
+  const { results } = await db
+    .prepare("DELETE FROM sessions WHERE refresh_hash = ?1 OR previous_refresh_hash = ?1 RETURNING id, user_id")
     .bind(oldHash)
-    .run();
+    .all<{ id: string; user_id: string }>();
+  if (onRevoked && results.length > 0) await onRevoked(results.map((r) => ({ userId: r.user_id, sessionId: r.id })));
   throw new AuthError(401, "invalid_refresh_token");
 }
 

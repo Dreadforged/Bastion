@@ -37,13 +37,28 @@ let db: D1Database;
 let email: StubEmailSender;
 let now: number;
 let ipAllowed: boolean;
+/** Sessions whose gateway sockets the routes asked to close. */
+let ended: { userId: string; sessionIds: string[] }[];
 
 beforeEach(() => {
   db = createTestD1();
   email = new StubEmailSender();
   now = Date.UTC(2026, 10, 18);
   ipAllowed = true;
+  ended = [];
 });
+
+async function userIdOf(address = "user@example.com") {
+  return (await db.prepare("SELECT id FROM users WHERE email = ?").bind(address).first<{ id: string }>())!.id;
+}
+
+async function sessionIds(accessOrUser: { userId?: string; deviceId?: string }) {
+  const { results } = await db
+    .prepare("SELECT id FROM sessions WHERE (?1 IS NULL OR user_id = ?1) AND (?2 IS NULL OR device_id = ?2) ORDER BY id")
+    .bind(accessOrUser.userId ?? null, accessOrUser.deviceId ?? null)
+    .all<{ id: string }>();
+  return results.map((r) => r.id);
+}
 
 const ipLimit = { limit: async () => ({ success: ipAllowed }) } as RateLimit;
 
@@ -57,7 +72,16 @@ async function call(method: string, path: string, body?: unknown, token?: string
   });
   const res = await handleAuth(
     request,
-    { db, email, passkeys: fakePasskeys, appOrigin: "https://app.test", now: () => now },
+    {
+      db,
+      email,
+      passkeys: fakePasskeys,
+      appOrigin: "https://app.test",
+      now: () => now,
+      endSessions: async (userId, sessionIds) => {
+        ended.push({ userId, sessionIds });
+      },
+    },
     ipLimit,
   );
   if (!res) throw new Error(`unrouted ${method} ${path}`);
@@ -211,15 +235,40 @@ describe("sessions", () => {
     expect(first.body.refreshToken).not.toBe(body.tokens.refreshToken);
 
     // The old token was already used: treat it as stolen.
+    const [sessionId] = await sessionIds({});
     expect((await call("POST", "/auth/refresh", { refreshToken: body.tokens.refreshToken })).status).toBe(401);
+    expect(ended).toEqual([{ userId: await userIdOf(), sessionIds: [sessionId] }]);
     expect((await call("POST", "/auth/refresh", { refreshToken: first.body.refreshToken })).status).toBe(401);
     expect((await call("GET", "/auth/devices", undefined, first.body.accessToken)).status).toBe(401);
   });
 
-  it("signs out", async () => {
+  it("signs out and closes that session's sockets", async () => {
     const { body } = await signUp();
+    const [sessionId] = await sessionIds({});
     expect((await call("POST", "/auth/signout", undefined, body.tokens.accessToken)).status).toBe(204);
     expect((await call("GET", "/auth/devices", undefined, body.tokens.accessToken)).status).toBe(401);
+    expect(ended).toEqual([{ userId: await userIdOf(), sessionIds: [sessionId] }]);
+  });
+
+  it("still signs out when closing sockets fails", async () => {
+    const { body } = await signUp();
+    const request = new Request("https://api.test/auth/signout", {
+      method: "POST",
+      headers: { authorization: `Bearer ${body.tokens.accessToken}` },
+    });
+    const failing = async () => {
+      throw new Error("unreachable");
+    };
+    const res = await handleAuth(request, {
+      db,
+      email,
+      passkeys: fakePasskeys,
+      appOrigin: "https://app.test",
+      now: () => now,
+      endSessions: failing,
+    });
+    expect(res?.status).toBe(204);
+    expect(await sessionIds({})).toEqual([]);
   });
 });
 
@@ -286,8 +335,11 @@ describe("devices", () => {
     const second = await registerPasskey(lastLinkToken(), "Phone");
     const devices = await call("GET", "/auth/devices", undefined, first.body.tokens.accessToken);
     const phone = devices.body.find((d: { name: string }) => d.name === "Phone");
+    const phoneSessions = await sessionIds({ deviceId: phone.id });
+    expect(phoneSessions).toHaveLength(1);
 
     expect((await call("DELETE", `/auth/devices/${phone.id}`, undefined, first.body.tokens.accessToken)).status).toBe(204);
+    expect(ended).toEqual([{ userId: await userIdOf(), sessionIds: phoneSessions }]);
     expect((await call("GET", "/auth/devices", undefined, second.body.tokens.accessToken)).status).toBe(401);
     expect((await signIn(second.credentialId)).status).toBe(401);
   });

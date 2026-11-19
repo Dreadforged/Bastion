@@ -1,7 +1,7 @@
 import { Id, schemas } from "@bastion/shared";
 import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
 import type { z } from "zod";
-import type { AuthDeps } from "./deps.js";
+import { closeSockets, type AuthDeps } from "./deps.js";
 import { listDevices, revokeDevice } from "./devices.js";
 import {
   approveDeviceRequest,
@@ -105,7 +105,7 @@ export async function handleAuth(request: Request, deps: AuthDeps, ipLimit?: Rat
       case "POST /auth/refresh": {
         await limitIp(ipLimit, request);
         const { refreshToken } = await parse(request, schemas.RefreshRequest);
-        return json(await refresh(deps.db, refreshToken, deps.now()));
+        return json(await refresh(deps.db, refreshToken, deps.now(), (ended) => closeSockets(deps, ended)));
       }
     }
 
@@ -113,6 +113,7 @@ export async function handleAuth(request: Request, deps: AuthDeps, ipLimit?: Rat
     const principal = await authenticate(deps.db, request, deps.now());
     if (route === "POST /auth/signout") {
       await signOut(deps.db, principal);
+      await closeSockets(deps, [principal]);
       return json(null, 204);
     }
     if (route === "GET /auth/devices") return json(await listDevices(deps, principal));

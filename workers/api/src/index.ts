@@ -43,6 +43,7 @@ export default {
         passkeys: simpleWebAuthn({ id: env.RP_ID, name: env.RP_NAME, origin: env.APP_ORIGIN }),
         appOrigin: env.APP_ORIGIN,
         now: Date.now,
+        endSessions: (userId, sessionIds) => env.USER_SESSION.get(env.USER_SESSION.idFromName(userId)).closeSessions(sessionIds),
       },
       env.AUTH_RATE_LIMIT,
     );

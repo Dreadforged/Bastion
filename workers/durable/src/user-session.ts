@@ -1,4 +1,4 @@
-import { GATEWAY_PROTOCOL, type GatewayEvent, type schemas } from "@bastion/shared";
+import { CloseCode, GATEWAY_PROTOCOL, type GatewayEvent, type schemas } from "@bastion/shared";
 import { DurableObject } from "cloudflare:workers";
 import { SESSION_HEADERS, type DurableEnv } from "./env.js";
 import { SessionCore, type Attachment, type Conn } from "./session/core.js";
@@ -95,8 +95,16 @@ export class UserSession extends DurableObject<DurableEnv> {
     return this.core.createServer(userId, idempotencyKey, name);
   }
 
-  /** Close the sockets of an auth session, e.g. after sign-out. */
-  async closeSession(sessionId: string): Promise<void> {
-    for (const ws of this.ctx.getWebSockets(sessionId)) ws.close(4004, "session ended");
+  /** Close the sockets of ended auth sessions: sign-out, device removal or token reuse. */
+  async closeSessions(sessionIds: string[]): Promise<void> {
+    for (const sessionId of sessionIds) {
+      for (const ws of this.ctx.getWebSockets(sessionId)) {
+        try {
+          ws.close(CloseCode.SESSION_ENDED, "session ended");
+        } catch {
+          // already closing
+        }
+      }
+    }
   }
 }
