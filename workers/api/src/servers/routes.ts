@@ -6,6 +6,7 @@ import { AuthError } from "../auth/errors.js";
 import { json } from "../auth/routes.js";
 import { authenticate, type Principal } from "../auth/sessions.js";
 import { body, HttpError, id, query } from "../http.js";
+import { applyVoiceEffects, issueToken, type VoiceDeps } from "../voice/livekit.js";
 
 export interface ServerRouteDeps {
   db: D1Database;
@@ -16,6 +17,10 @@ export interface ServerRouteDeps {
   userLimit?: RateLimit | undefined;
   /** Cut a user off from an encrypted conversation. Optional in tests. */
   revokeConversationAccess?: ((conversationId: string, userId: string) => Promise<void>) | undefined;
+  /** LiveKit settings and admin client. Without them the voice token route answers 503. */
+  voice?: VoiceDeps | undefined;
+  /** A user's plan, for stream quality and viewer limits. Everyone is on free if unset. */
+  planFor?: ((userId: string) => Promise<schemas.Plan>) | undefined;
 }
 
 function inviteCode(value: string | undefined): string {
@@ -38,7 +43,12 @@ function reply(r: Reply): Response {
 }
 
 /** Map a route under /servers/:id to a Server object op. */
-async function serverOp(request: Request, parts: string[], principal: Principal): Promise<ServerOpInput | null> {
+async function serverOp(
+  request: Request,
+  parts: string[],
+  principal: Principal,
+  plan: () => Promise<schemas.Plan>,
+): Promise<ServerOpInput | null> {
   const m = request.method;
   const [, , a, b, c, d, e] = parts;
   const n = parts.length;
@@ -112,6 +122,21 @@ async function serverOp(request: Request, parts: string[], principal: Principal)
     return null;
   }
 
+  if (a === "voice") {
+    if (n === 4 && b === "token" && m === "POST") {
+      const req = await body(request, schemas.VoiceTokenRequest);
+      return { type: "voice.join", channelId: req.channelId, screenShare: req.screenShare, plan: await plan() };
+    }
+    if (n === 3 && m === "GET") return { type: "voice.list" };
+    if (n === 3 && m === "PATCH") return { type: "voice.update", body: await body(request, schemas.UpdateVoiceStateRequest) };
+    if (n === 3 && m === "DELETE") return { type: "voice.leave" };
+    if (n === 4 && m === "DELETE") return { type: "voice.disconnect", userId: id(b), body: await body(request, schemas.ReasonRequest) };
+    if (n === 5 && c === "end-stream" && m === "POST") {
+      return { type: "voice.end_stream", userId: id(b), body: await body(request, schemas.ReasonRequest) };
+    }
+    return null;
+  }
+
   if (a === "audit-log" && n === 3 && m === "GET") return { type: "audit.list", query: query(request, schemas.AuditLogQuery) };
 
   if (a === "invites" && n === 3 && m === "POST") {
@@ -149,6 +174,14 @@ async function revokeChannels(deps: ServerRouteDeps, serverId: string, userId: s
     .bind(serverId, userId)
     .all<{ conversation_id: string }>();
   await Promise.allSettled(results.map((r) => deps.revokeConversationAccess!(r.conversation_id, userId)));
+}
+
+/** The join reply plus a signed LiveKit token. Never cached. */
+async function voiceToken(voice: VoiceDeps, now: number, granted: unknown): Promise<Response> {
+  const g = granted as Omit<schemas.VoiceTokenResponse, "url" | "token" | "expiresAt">;
+  const { token, expiresAt } = await issueToken(voice.config, g, now);
+  const response: schemas.VoiceTokenResponse = { ...g, url: voice.config.url, token, expiresAt };
+  return json(response);
 }
 
 async function inviteServer(deps: ServerRouteDeps, code: string): Promise<string> {
@@ -238,10 +271,13 @@ export async function handleServers(request: Request, deps: ServerRouteDeps): Pr
       }
       if (parts.length >= 2) {
         const serverId = id(parts[1]);
-        const op = await serverOp(request, parts, principal);
+        const op = await serverOp(request, parts, principal, async () => (await deps.planFor?.(principal.userId)) ?? "free");
         if (op) {
+          if (op.type === "voice.join" && !deps.voice) throw new HttpError(503, "voice_unavailable");
           const r = await handle(serverId, op);
           await applyEffects(deps, serverId, r);
+          if (deps.voice) await applyVoiceEffects(deps.voice.admin, r.effects?.voice);
+          if (op.type === "voice.join" && r.status === 200 && deps.voice) return await voiceToken(deps.voice, deps.now(), r.body);
           if ((op.type === "member.remove" || op.type === "ban.put") && r.status < 300) await revokeChannels(deps, serverId, op.userId);
           return reply(r);
         }
