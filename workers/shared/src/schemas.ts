@@ -18,6 +18,7 @@ export const User = z.object({
 export type User = z.infer<typeof User>;
 
 export * from "./auth.js";
+export * from "./safety.js";
 export * from "./servers.js";
 export * from "./gateway.js";
 export * from "./moderation.js";

@@ -2,6 +2,9 @@ import { cleanupExpired } from "./auth/devices.js";
 import { createEmailSender } from "./auth/email.js";
 import { simpleWebAuthn } from "./auth/passkeys.js";
 import { handleAccount } from "./account/routes.js";
+import { advanceAgeBands } from "./safety/account.js";
+import { FlagReader } from "./safety/flags.js";
+import { handleSafety } from "./safety/routes.js";
 import { handleAuth, json } from "./auth/routes.js";
 import { handleConversations } from "./conversations/routes.js";
 import { NoopScanner } from "./files/scanner.js";
@@ -52,6 +55,13 @@ function voiceDeps(env: Env): VoiceDeps | undefined {
   return { config, admin: new HttpLiveKitAdmin(config) };
 }
 
+// Kept at module level so the flag cache is shared by requests in this isolate.
+let flagReader: FlagReader | undefined;
+function flagsFor(env: Env): FlagReader {
+  flagReader ??= new FlagReader(env.DB, Date.now);
+  return flagReader;
+}
+
 export default {
   async fetch(request, env): Promise<Response> {
     const url = new URL(request.url);
@@ -82,6 +92,9 @@ export default {
       env.AUTH_RATE_LIMIT,
     );
     if (auth) return auth;
+
+    const safety = await handleSafety(request, { db: env.DB, flags: flagsFor(env), now: Date.now, userLimit: env.API_RATE_LIMIT });
+    if (safety) return safety;
 
     const account = await handleAccount(request, { db: env.DB, sessions: env.USER_SESSION, now: Date.now, userLimit: env.API_RATE_LIMIT });
     if (account) return account;
@@ -134,5 +147,6 @@ export default {
     await cleanupExpired(env.DB, Date.now());
     await cleanupInviteCodes(env.DB, Date.now());
     await cleanupPendingFiles(env.DB, env.FILES, Date.now());
+    await advanceAgeBands(env.DB, flagsFor(env), Date.now());
   },
 } satisfies ExportedHandler<Env>;
