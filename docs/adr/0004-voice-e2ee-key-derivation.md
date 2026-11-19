@@ -67,17 +67,58 @@ baseKey = MLS-Exporter("bastion/voice/v1", utf8(roomId), 32)
 - The first byte of audio frames and the first 3 or 10 bytes of video frames
   (codec headers the media server needs) stay unencrypted. That is LiveKit's
   behaviour.
-- A DM call needs a server route to hand out LiveKit tokens for a DM call and a
-  way to ring the other person. Neither exists yet; only the group side does.
+- A DM call's ring is an ephemeral gateway event (`CALL_UPDATE`). If the
+  callee's client is offline or reconnecting when it is sent, they miss it; the
+  caller's ring lapses after 45 s. There are no push notifications.
+- Ring and lease expiry on the server is lazy (no timers): a lapsed ring or an
+  answered call that stopped renewing is closed the next time either person
+  touches the call. Clients also time out on their own.
+- A call's MLS group is only checked by the Worker to be a plain group of
+  exactly the two people (and not the DM or a channel); it cannot check that the
+  device behind it did the cryptography right. Each call's group is used once.
+- Call groups are never deleted from a device's MLS state, so they pile up over
+  time. A cleanup needs a group-removal call in the WASM client. Not done.
+
+## DM calls (server)
+
+The DM's own Conversation object holds the call state, so only its two members
+can ring, answer, decline or end. Routes (all under `/conversations/:id/call`):
+`POST` rings and returns a LiveKit token for the caller, `POST /accept` answers
+and returns one for the callee, `POST /decline`, `PATCH` renews (every 30 s,
+lease 90 s), `DELETE` cancels or hangs up (for both people), `GET` reads the
+live call. The Worker signs the tokens, so a Conversation object never sees the
+LiveKit secret. LiveKit only sees random room and participant ids; neither is in
+the `CALL_UPDATE` event. Starting a call needs `groupConversationId`, a fresh
+`group` conversation with exactly the two people, made by the caller first
+(`startDmCallGroup`); the Worker rejects anything else, and the object rejects a
+group already used for an earlier call. One live call per DM, a 5 s redial wait,
+the plan (and so screen share quality) comes from the Worker, never the client.
+Ending a call removes both participants from LiveKit.
+
+## Client wiring
+
+`E2ee.voice()` hands the voice layer the same MLS client messaging uses, and
+saves group state after anything voice changes (a commit accepted or rejected,
+a group created, a Welcome joined). `E2ee.markCallGroup` keeps a call's key
+group out of the chat list; the controller also asks the server what an
+unfamiliar conversation is before showing it. `VoiceService` owns the one call
+this device is in and the ring flow; the UI is in `ui/Voice.tsx`.
 
 ## Not verified
 
-Run: Rust tests for the exporter, wasm build, and the web tests for key
+Run: server tests for the DM call routes and state machine (ring, answer, decline,
+cancel, expiry, permissions, one live call, key group checks, LiveKit clean-up
+against a fake), web tests for the call service (channel join, mute, screen
+share tiers, outgoing and incoming DM calls, ring timeout, decline, drop), and a
+real-MLS test that a caller's call group is joined by the callee through
+`E2ee` and both derive the same key. Earlier: Rust tests for the exporter, wasm build, and the web tests for key
 derivation, rotation, DM call groups, the call flow against a fake room, and
 the key provider's events (real MLS through WASM, no browser).
 
 Not run, because it needs things we do not have here: a real LiveKit server,
-and real browsers. Chrome, Firefox and Safari behave differently for encoded
+real browsers, and a deployed Worker (nothing here ran against workerd, only
+the object logic over node:sqlite). The React screens (`ui/Voice.tsx`, the
+join and call buttons) were typechecked but never rendered or clicked. Chrome, Firefox and Safari behave differently for encoded
 transforms, and the worker and the screen share capture settings have never
 executed. In particular untested: that frames actually come out encrypted on
 the wire, that a keyframe after rotation decodes, Safari's lack of some codecs
