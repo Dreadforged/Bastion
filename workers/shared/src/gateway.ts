@@ -4,6 +4,7 @@ import { ConversationId } from "./conversations.js";
 import { AuditLogEntry, Report } from "./moderation.js";
 import { Channel, Member, Message, Role, Server, VisibleStatus } from "./servers.js";
 import { VoiceState } from "./voice.js";
+import { DmCall } from "./calls.js";
 
 /**
  * Gateway: the realtime WebSocket each client keeps open to its UserSession.
@@ -97,6 +98,13 @@ export const EventPayloads = {
    * clients fetch the envelopes. Also sent when the user is added.
    */
   CONVERSATION_UPDATE: z.object({ conversationId: ConversationId, seq: z.number().int().nonnegative() }),
+  /**
+   * A direct message call started ringing, was answered, or ended. Sent to
+   * both people on every device they have open, so a second device stops
+   * ringing when the first answers. Not replayed on resume: a ring that
+   * arrives while the client is offline is simply missed.
+   */
+  CALL_UPDATE: DmCall,
 } as const;
 
 export type EventName = keyof typeof EventPayloads;
@@ -110,7 +118,7 @@ export type GatewayEvent = {
 }[EventName];
 
 /** Events that are not kept for resume; missing one is harmless. */
-export const EPHEMERAL_EVENTS: ReadonlySet<EventName> = new Set(["TYPING_START", "VOICE_STATE_UPDATE"]);
+export const EPHEMERAL_EVENTS: ReadonlySet<EventName> = new Set(["TYPING_START", "VOICE_STATE_UPDATE", "CALL_UPDATE"]);
 
 export const ReadyPayload = z.object({
   userId: Id,
