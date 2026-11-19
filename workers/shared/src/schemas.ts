@@ -49,3 +49,4 @@ export type ServerFrame = z.infer<typeof ServerFrame>;
 export * from "./auth.js";
 export * from "./servers.js";
 export * from "./gateway.js";
+export * from "./moderation.js";

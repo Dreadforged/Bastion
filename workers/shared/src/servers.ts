@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { Id } from "./ids.js";
+import { MODERATION_LIMITS } from "./moderation.js";
 
 /**
  * Servers, channels, roles, members, messages and invites: entity shapes and
@@ -77,6 +78,8 @@ export const Channel = z.object({
   kind: ChannelKind,
   position: z.number().int().nonnegative(),
   overrides: z.array(ChannelOverride),
+  /** Seconds a member must wait between messages; 0 is off. */
+  slowModeSeconds: z.number().int().nonnegative(),
 });
 export type Channel = z.infer<typeof Channel>;
 
@@ -87,6 +90,8 @@ export const Member = z.object({
   /** Role ids, not including @everyone. */
   roles: z.array(Id),
   joinedAt: z.number().int(),
+  /** Unix ms the member's timeout ends, or null. Past values mean no timeout. */
+  timeoutUntil: z.number().int().nullable(),
 });
 export type Member = z.infer<typeof Member>;
 
@@ -130,16 +135,20 @@ export type InvitePreview = z.infer<typeof InvitePreview>;
 
 export const CreateServerRequest = z.object({ name: Name });
 
+const SlowModeSeconds = z.number().int().min(0).max(MODERATION_LIMITS.maxSlowModeSeconds);
+
 export const CreateChannelRequest = z.object({
   name: Name,
   kind: z.enum(["text", "voice"]).default("text"),
   position: z.number().int().nonnegative().max(10_000).optional(),
+  slowModeSeconds: SlowModeSeconds.default(0),
 });
 
 export const UpdateChannelRequest = z
   .object({
     name: Name.optional(),
     position: z.number().int().nonnegative().max(10_000).optional(),
+    slowModeSeconds: SlowModeSeconds.optional(),
   })
   .refine((v) => Object.keys(v).length > 0, "nothing to update");
 

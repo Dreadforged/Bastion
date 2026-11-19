@@ -109,4 +109,65 @@ export const SERVER_MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX outbox_user ON outbox (user_id, id);
   `,
+  `
+  -- Moderation.
+  ALTER TABLE channels ADD COLUMN slow_mode_seconds INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE bans ADD COLUMN reason TEXT;
+  ALTER TABLE bans ADD COLUMN created_by TEXT;
+
+  -- Kept apart from members so leaving and rejoining does not end a timeout.
+  CREATE TABLE timeouts (
+    user_id TEXT PRIMARY KEY,
+    until   INTEGER NOT NULL                -- unix ms
+  );
+
+  -- When each member last posted in a slow mode channel.
+  CREATE TABLE slow_mode (
+    channel_id TEXT NOT NULL REFERENCES channels (id) ON DELETE CASCADE,
+    user_id    TEXT NOT NULL,
+    last_at    INTEGER NOT NULL,
+    PRIMARY KEY (channel_id, user_id)
+  );
+
+  -- The reporter is kept to stop duplicate reports and is never shown to
+  -- moderators. Closed reports are deleted after the retention period.
+  CREATE TABLE reports (
+    id          TEXT PRIMARY KEY,
+    channel_id  TEXT NOT NULL REFERENCES channels (id) ON DELETE CASCADE,
+    reporter_id TEXT NOT NULL,
+    category    TEXT NOT NULL,
+    note        TEXT,
+    status      TEXT NOT NULL CHECK (status IN ('open', 'resolved', 'dismissed')),
+    handled_by  TEXT,
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL
+  );
+  CREATE INDEX reports_status ON reports (status, updated_at);
+
+  -- Plaintext the reporter's device chose to forward. Only these messages.
+  CREATE TABLE report_messages (
+    report_id  TEXT NOT NULL REFERENCES reports (id) ON DELETE CASCADE,
+    message_id TEXT NOT NULL,
+    author_id  TEXT NOT NULL,
+    content    TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (report_id, message_id)
+  );
+  CREATE INDEX report_messages_message ON report_messages (message_id);
+
+  CREATE TABLE audit_log (
+    id         TEXT PRIMARY KEY,
+    actor_id   TEXT NOT NULL,
+    action     TEXT NOT NULL,
+    target_id  TEXT,
+    channel_id TEXT,
+    reason     TEXT,
+    data       TEXT NOT NULL,                -- JSON object
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX audit_log_created ON audit_log (created_at);
+
+  -- Recipient must still hold these permissions (in channel_id when set).
+  ALTER TABLE outbox ADD COLUMN permission TEXT;
+  `,
 ];

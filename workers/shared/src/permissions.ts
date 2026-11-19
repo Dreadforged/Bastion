@@ -26,6 +26,12 @@ export const Permission = {
 
 export type PermissionName = keyof typeof Permission;
 
+/**
+ * What a timed-out member keeps: they can read, but not send, react, join
+ * voice or act as a moderator until the timeout ends.
+ */
+export const TIMEOUT_ALLOWED: bigint = Permission.VIEW_CHANNEL;
+
 /** Every permission bit defined in v1. */
 export const ALL_PERMISSIONS: bigint = Object.values(Permission).reduce(
   (acc, bit) => acc | bit,
@@ -60,6 +66,8 @@ export interface PermissionContext {
   /** Roles held by the member, not including @everyone. */
   memberRoles: readonly Role[];
   channel?: ChannelOverrides;
+  /** The member is in a timeout right now. Ignored for the owner and admins. */
+  timedOut?: boolean;
 }
 
 export function has(permissions: bigint, flag: bigint): boolean {
@@ -75,12 +83,17 @@ function isOwnerOrAdmin(ctx: PermissionContext, base: bigint): boolean {
   return ctx.userId === ctx.ownerId || has(base, Permission.ADMINISTRATOR);
 }
 
+/** A timeout strips everything but reading, after overrides are applied. */
+function restrict(ctx: PermissionContext, perms: bigint): bigint {
+  return ctx.timedOut ? perms & TIMEOUT_ALLOWED : perms;
+}
+
 /** Server-level permissions: @everyone ORed with every member role. */
 export function computeBasePermissions(ctx: PermissionContext): bigint {
   let perms = ctx.everyoneRole.permissions;
   for (const role of ctx.memberRoles) perms |= role.permissions;
   if (isOwnerOrAdmin(ctx, perms)) return ALL_PERMISSIONS;
-  return perms & MASK_64;
+  return restrict(ctx, perms) & MASK_64;
 }
 
 /**
@@ -90,6 +103,7 @@ export function computeBasePermissions(ctx: PermissionContext): bigint {
  * 2. Server owner or ADMINISTRATOR: grant everything and stop.
  * 3. Apply channel overrides in order: @everyone, then all role denies,
  *    then all role allows, then the member override.
+ * 4. A member in a timeout keeps only TIMEOUT_ALLOWED.
  */
 export function computePermissions(ctx: PermissionContext): bigint {
   let perms = ctx.everyoneRole.permissions;
@@ -97,7 +111,7 @@ export function computePermissions(ctx: PermissionContext): bigint {
   if (isOwnerOrAdmin(ctx, perms)) return ALL_PERMISSIONS;
 
   const channel = ctx.channel;
-  if (!channel) return perms & MASK_64;
+  if (!channel) return restrict(ctx, perms) & MASK_64;
 
   perms = apply(perms, channel.everyone);
 
@@ -112,7 +126,7 @@ export function computePermissions(ctx: PermissionContext): bigint {
   perms = (perms & ~roleDeny) | roleAllow;
 
   perms = apply(perms, channel.members?.[ctx.userId]);
-  return perms & MASK_64;
+  return restrict(ctx, perms) & MASK_64;
 }
 
 /** Serialize a permission set for JSON and D1 storage (decimal string). */
