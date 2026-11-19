@@ -1,6 +1,7 @@
 import { GATEWAY_AUTH_PREFIX, GATEWAY_PROTOCOL, Id, schemas } from "@bastion/shared";
 import type { Reply, Server, ServerOpInput, UserSession } from "@bastion/durable";
 import { SESSION_HEADERS } from "@bastion/durable/env";
+import { getPrivacy } from "../account/privacy.js";
 import type { z } from "zod";
 import { AuthError } from "../auth/errors.js";
 import { json } from "../auth/routes.js";
@@ -273,6 +274,8 @@ export async function handleServers(request: Request, deps: ServerRouteDeps): Pr
         const serverId = id(parts[1]);
         const op = await serverOp(request, parts, principal, async () => (await deps.planFor?.(principal.userId)) ?? "free");
         if (op) {
+          // Someone who turned typing indicators off never sends one.
+          if (op.type === "typing" && !(await getPrivacy(deps.db, principal.userId)).typingIndicators) return json(null, 204);
           if (op.type === "voice.join" && !deps.voice) throw new HttpError(503, "voice_unavailable");
           const r = await handle(serverId, op);
           await applyEffects(deps, serverId, r);

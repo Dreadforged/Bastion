@@ -25,3 +25,4 @@ export * from "./conversations.js";
 export * from "./voice.js";
 export * from "./calls.js";
 export * from "./files.js";
+export * from "./account.js";

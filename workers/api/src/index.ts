@@ -1,6 +1,7 @@
 import { cleanupExpired } from "./auth/devices.js";
 import { createEmailSender } from "./auth/email.js";
 import { simpleWebAuthn } from "./auth/passkeys.js";
+import { handleAccount } from "./account/routes.js";
 import { handleAuth, json } from "./auth/routes.js";
 import { handleConversations } from "./conversations/routes.js";
 import { NoopScanner } from "./files/scanner.js";
@@ -81,6 +82,9 @@ export default {
       env.AUTH_RATE_LIMIT,
     );
     if (auth) return auth;
+
+    const account = await handleAccount(request, { db: env.DB, sessions: env.USER_SESSION, now: Date.now, userLimit: env.API_RATE_LIMIT });
+    if (account) return account;
 
     const servers = await handleServers(request, {
       db: env.DB,
