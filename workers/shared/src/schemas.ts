@@ -17,32 +17,6 @@ export const User = z.object({
 });
 export type User = z.infer<typeof User>;
 
-export const Server = z.object({
-  id: Id,
-  name: z.string().min(1).max(100),
-  ownerId: Id,
-});
-export type Server = z.infer<typeof Server>;
-
-export const Role = z.object({
-  id: Id,
-  serverId: Id,
-  name: z.string().min(1).max(100),
-  permissions: PermissionString,
-  position: z.number().int().nonnegative(),
-});
-export type Role = z.infer<typeof Role>;
-
-export const ChannelKind = z.enum(["text", "voice"]);
-
-export const Channel = z.object({
-  id: Id,
-  serverId: Id,
-  name: z.string().min(1).max(100),
-  kind: ChannelKind,
-});
-export type Channel = z.infer<typeof Channel>;
-
 /**
  * Message envelope. Content is end-to-end encrypted with MLS, so the server
  * only ever sees ciphertext.
@@ -73,3 +47,5 @@ export const ServerFrame = z.discriminatedUnion("type", [
 export type ServerFrame = z.infer<typeof ServerFrame>;
 
 export * from "./auth.js";
+export * from "./servers.js";
+export * from "./gateway.js";
