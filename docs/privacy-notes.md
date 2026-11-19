@@ -10,6 +10,9 @@ Working notes for whoever writes the public privacy page and the marketing
 | --- | --- | --- | --- |
 | Email address, created date | D1 `users` | Yes | Until the account is deleted |
 | Recovery code | D1 `users` | Hash only (Argon2id) | Until used |
+| Age band, how it was learned, country code, account state and reason | D1 `users` | Yes | Until the account is deleted (removed under-13 accounts: 7 days, then deleted unless held) |
+| Age signals | D1 `age_signals` | Yes | 6 months |
+| Terms and policy versions accepted | D1 `terms_acceptances` | Yes | Until the account is deleted |
 | Devices: name, passkey public key, last seen | D1 `devices` | Public key only | Until the device is removed |
 | Sign-in sessions | D1 `sessions` | Hashes only | Access 15 minutes, refresh until expiry, then cleaned up hourly |
 | Encryption keys: public identity key, one-time key packages | D1 | Public keys only | Until used or the device is removed |
@@ -49,7 +52,17 @@ The honest statement, from what the code does:
 - Presence (online, idle, do not disturb) is shared with people who share a
   server with you. Choosing Invisible shares nothing. Typing indicators can be
   turned off in Settings, Privacy and data.
-- Who may start a DM with you is a setting.
+- Who may start a DM with you is a setting: anyone, people you share a server
+  with plus requests from others, or nobody. Under 18s cannot choose anyone.
+  For a request the server also knows its state (waiting, accepted, declined)
+  and that the sender has used their one allowed message.
+- Age: only a band (13 to 15, 16 to 17, 18 plus), how it was learned and a
+  country code are kept, never a birth date. Age signals (reports, moderator
+  flags, a younger second answer) are kept 6 months. Staff can see the email
+  and these signals for flagged accounts, and every view is logged.
+- Deleting an account removes it, its keys, files and memberships. Staff log
+  entries (ids and actions only) remain. A legal hold blocks deletion and we
+  may not be able to say why.
 
 Suggested table rows for marketing: "Who talks to whom, and when: yes, the
 server needs this to deliver messages. What is said: no."
