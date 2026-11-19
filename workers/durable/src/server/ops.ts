@@ -52,6 +52,18 @@ export const ServerOp = z.discriminatedUnion("type", [
   z.object({ type: z.literal("message.delete"), channelId: Id, messageId: Id }),
   z.object({ type: z.literal("typing"), channelId: Id }),
 
+  /** Join or refresh a voice channel. The Worker adds the plan; clients cannot set it. */
+  z.object({ type: z.literal("voice.join"), channelId: Id, screenShare: z.boolean().default(false), plan: schemas.Plan.default("free") }),
+  z.object({ type: z.literal("voice.leave") }),
+  /** Self mute, deafen, stream on or off. Also renews the lease. */
+  z.object({ type: z.literal("voice.update"), body: schemas.UpdateVoiceStateRequest }),
+  z.object({ type: z.literal("voice.list") }),
+  z.object({ type: z.literal("voice.end_stream"), userId: Id, body: schemas.ReasonRequest.default({}) }),
+  z.object({ type: z.literal("voice.disconnect"), userId: Id, body: schemas.ReasonRequest.default({}) }),
+
+  /** Can this member view the channel, or attach files to it? Used by the file routes. */
+  z.object({ type: z.literal("channel.check"), channelId: Id, need: z.enum(["view", "attach_files"]) }),
+
   z.object({ type: z.literal("invite.create"), body: schemas.CreateInviteRequest }),
   z.object({ type: z.literal("invite.delete"), code: schemas.InviteCode }),
   z.object({ type: z.literal("invite.preview"), code: schemas.InviteCode }),
@@ -68,11 +80,28 @@ export const READ_ONLY_OPS: ReadonlySet<ServerOp["type"]> = new Set([
   "bans.list",
   "reports.list",
   "audit.list",
+  // State updates are absolute and renewed every 30 seconds, so they skip idempotency keys.
+  "voice.update",
+  "voice.list",
+  "channel.check",
 ]);
+
+/**
+ * What the Worker must tell LiveKit after a voice change. Applying one twice
+ * is harmless, so a replayed reply is safe.
+ */
+export type VoiceEffect =
+  | { kind: "remove"; roomId: string; participantId: string }
+  | { kind: "restrict"; roomId: string; participantId: string; canPublish: boolean; canShare: boolean };
 
 /** What a Server object answers. `effects` are for the Worker, not the client. */
 export interface Reply {
   status: number;
   body: unknown;
-  effects?: { inviteCreated?: { code: string; expiresAt: number | null }; inviteGone?: string; serverDeleted?: true };
+  effects?: {
+    inviteCreated?: { code: string; expiresAt: number | null };
+    inviteGone?: string;
+    serverDeleted?: true;
+    voice?: VoiceEffect[];
+  };
 }
