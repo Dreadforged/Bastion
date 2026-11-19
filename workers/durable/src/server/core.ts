@@ -1513,6 +1513,9 @@ export class ServerCore {
     if (body.streaming === true && !streaming) {
       if (!has(perms, P.STREAM)) fail(403, "missing_permissions");
       if (row.stream_blocked === 1) fail(403, "stream_blocked");
+      if (this.voiceRows().filter((v) => v.channel_id === row.channel_id && v.streaming === 1).length >= s.VOICE_LIMITS.maxStreamsPerRoom) {
+        fail(409, "too_many_streams");
+      }
       // The new stream's cap must fit everyone already in the room.
       const others = this.voiceRows().filter((v) => v.channel_id === row.channel_id && v.user_id !== userId);
       const live = [...others.filter((v) => v.streaming === 1), row];

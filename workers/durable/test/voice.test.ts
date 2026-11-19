@@ -481,6 +481,49 @@ describe("viewer limits", () => {
   });
 });
 
+describe("streams per room", () => {
+  it("allows four live streams in a room and refuses a fifth until one stops", async () => {
+    const role = await createRole(P.STREAM, 2);
+    const streamers: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      const user = newId();
+      world.now += 2000;
+      await world.join(serverId, owner, user);
+      await grant(user, role);
+      expect((await join(user, { screenShare: true })).status).toBe(200);
+      streamers.push(user);
+    }
+    for (const user of streamers.slice(0, 4)) {
+      world.now += 2000;
+      expect((await update(user, { streaming: true })).status).toBe(200);
+    }
+    world.now += 2000;
+    expect((await update(streamers[4]!, { streaming: true })).body).toEqual({ error: "too_many_streams" });
+    expect((await list(owner)).filter((s) => s.streaming)).toHaveLength(schemas.VOICE_LIMITS.maxStreamsPerRoom);
+
+    // Already streaming people can keep renewing, and a stopped stream frees the slot.
+    world.now += 2000;
+    expect((await update(streamers[0]!, { streaming: true })).status).toBe(200);
+    expect((await update(streamers[0]!, { streaming: false })).status).toBe(200);
+    world.now += 2000;
+    expect((await update(streamers[4]!, { streaming: true })).status).toBe(200);
+  });
+
+  it("counts each room on its own", async () => {
+    const role = await createRole(P.STREAM, 2);
+    const other = await createChannel("second", "voice");
+    for (const [i, channelId] of [lounge, lounge, lounge, lounge, other].entries()) {
+      const user = newId();
+      world.now += 2000;
+      await world.join(serverId, owner, user);
+      await grant(user, role);
+      expect((await join(user, { channelId, screenShare: true })).status).toBe(200);
+      expect((await update(user, { streaming: true })).status).toBe(200);
+      void i;
+    }
+  });
+});
+
 // ------------------------------------------------------------------ timeouts and lost permissions
 
 describe("timeouts and lost access", () => {
