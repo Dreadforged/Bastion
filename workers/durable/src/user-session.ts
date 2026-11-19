@@ -95,6 +95,11 @@ export class UserSession extends DurableObject<DurableEnv> {
     return this.core.createServer(userId, idempotencyKey, name);
   }
 
+  /** Ids of the servers this user belongs to. Used by the account export. */
+  async listServerIds(): Promise<string[]> {
+    return this.core.serverIds();
+  }
+
   /** Close the sockets of ended auth sessions: sign-out, device removal or token reuse. */
   async closeSessions(sessionIds: string[]): Promise<void> {
     for (const sessionId of sessionIds) {

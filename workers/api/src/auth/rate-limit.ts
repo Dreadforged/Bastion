@@ -15,6 +15,8 @@ export const LIMITS = {
   signIn: { max: 10, windowMs: 5 * 60_000 },
   /** File uploads started per user. */
   fileUpload: { max: 30, windowMs: 10 * 60_000 },
+  /** Account data exports per user. */
+  accountExport: { max: 3, windowMs: 60 * 60_000 },
 } satisfies Record<string, Limit>;
 
 /**

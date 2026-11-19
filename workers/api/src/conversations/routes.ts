@@ -1,5 +1,6 @@
 import { schemas } from "@bastion/shared";
 import type { Conversation, ConversationOpInput, ConversationReply } from "@bastion/durable";
+import { getPrivacy } from "../account/privacy.js";
 import { AuthError } from "../auth/errors.js";
 import { toBase64Url } from "../auth/crypto.js";
 import { json } from "../auth/routes.js";
@@ -81,6 +82,9 @@ async function create(deps: ConversationRouteDeps, principal: Principal, request
     const peer = await db.prepare("SELECT id FROM users WHERE id = ?").bind(req.userId).first();
     if (!peer) throw new HttpError(404, "unknown_user");
     const [a, b] = [principal.userId, req.userId].sort() as [string, string];
+    // Only a new DM is refused; an existing one keeps working.
+    const existing = await db.prepare("SELECT 1 AS x FROM dm_pairs WHERE user_a = ? AND user_b = ?").bind(a, b).first();
+    if (!existing && (await getPrivacy(db, req.userId)).dmPolicy === "nobody") throw new HttpError(403, "cannot_message_user");
     await db.prepare("INSERT OR IGNORE INTO dm_pairs (user_a, user_b, conversation_id) VALUES (?, ?, ?)").bind(a, b, newId).run();
     const row = await db.prepare("SELECT conversation_id FROM dm_pairs WHERE user_a = ? AND user_b = ?").bind(a, b).first<{ conversation_id: string }>();
     if (row!.conversation_id !== newId) {
