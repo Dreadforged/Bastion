@@ -89,6 +89,7 @@ export function Shell({ controller, state }: { controller: Controller; state: Ap
       </aside>
 
       <main className="content">
+        {state.vaultProblem && <VaultProblem controller={controller} problem={state.vaultProblem} />}
         <ErrorBoundary key={JSON.stringify(view)}>
           {view.kind === "channel" && <ChannelView controller={controller} state={state} serverId={view.serverId} channelId={view.channelId} />}
           {view.kind === "dm" && <DmView controller={controller} state={state} conversationId={view.conversationId} />}
@@ -353,5 +354,30 @@ function Composer(props: { disabled?: boolean; placeholder: string; onSend: (tex
       />
       <button disabled={(props.disabled ?? false) || text.trim() === ""}>Send</button>
     </form>
+  );
+}
+
+function VaultProblem({ controller, problem }: { controller: Controller; problem: "unreadable" | "unsupported_version" }) {
+  const why =
+    problem === "unsupported_version"
+      ? "The saved history on this device was made by a different version of Bastion."
+      : "The saved history on this device could not be opened.";
+  return (
+    <div role="alert" className="error">
+      <p>
+        {why} It has not been changed or deleted. Until it opens, this device cannot read or send encrypted messages.
+      </p>
+      <button type="button" onClick={() => void controller.retryVault()}>
+        Try again
+      </button>{" "}
+      <button
+        type="button"
+        onClick={() => {
+          if (window.confirm("Carry on without the old history? It will be kept as a backup on this device, but will not show up in your chats.")) void controller.startFresh();
+        }}
+      >
+        Carry on without it
+      </button>
+    </div>
   );
 }

@@ -19,6 +19,8 @@ const NOTICES: Record<string, string> = {
 /** Plain words for what went wrong joining or starting a call. */
 export function voiceErrorText(code: string): string {
   switch (code) {
+    case "could_not_back_up_device_data":
+      return "Could not back up the old history, so nothing was changed.";
     case "not_in_group":
       return "This device has not set up encryption for this call yet. Try again in a moment.";
     case "unsupported_browser":

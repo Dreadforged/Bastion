@@ -16,6 +16,8 @@ const DB_NAME = "bastion-e2ee";
 const KEYS = "keys";
 const STATE = "state";
 const IV_BYTES = 12;
+/** Backups live beside the live record under `<id>#backup-<stamp>`. */
+const BACKUP_MARK = "#backup-";
 
 export interface StateVault {
   /** The saved state for a device, or null if there is none. */
@@ -27,6 +29,14 @@ export interface StateVault {
    * or a forced sign-out must never call this.
    */
   remove(id: string): Promise<void>;
+  /**
+   * Copy a device's saved state and its key to a backup slot, leaving the original
+   * untouched. Returns the backup id, or null if there was nothing saved. Call this
+   * before anything that could replace state that failed to load.
+   */
+  backup(id: string): Promise<string | null>;
+  /** Put a backup made by `backup` back as the live state (the backup stays). */
+  restore(id: string, backupId: string): Promise<void>;
   /** Remove every key and every saved state (all accounts on this browser profile). Same rules as `remove`. */
   clear(): Promise<void>;
 }
@@ -114,11 +124,42 @@ export class IdbStateVault implements StateVault {
     }
   }
 
+  async backup(id: string): Promise<string | null> {
+    const db = await this.open();
+    const record = (await request(db.transaction(STATE).objectStore(STATE).get(id))) as Uint8Array | undefined;
+    if (!record) return null;
+    const key = (await request(db.transaction(KEYS).objectStore(KEYS).get(id))) as CryptoKey | undefined;
+    const backupId = `${id}${BACKUP_MARK}${Date.now()}-${Array.from(this.random(4)).join("")}`;
+    const tx = db.transaction([KEYS, STATE], "readwrite");
+    tx.objectStore(STATE).put(record, backupId);
+    if (key) tx.objectStore(KEYS).put(key, backupId);
+    await done(tx);
+    return backupId;
+  }
+
+  async restore(id: string, backupId: string): Promise<void> {
+    if (!backupId.startsWith(id + BACKUP_MARK)) throw new Error("backup_mismatch");
+    const db = await this.open();
+    const record = (await request(db.transaction(STATE).objectStore(STATE).get(backupId))) as Uint8Array | undefined;
+    if (!record) throw new Error("backup_missing");
+    const key = (await request(db.transaction(KEYS).objectStore(KEYS).get(backupId))) as CryptoKey | undefined;
+    const tx = db.transaction([KEYS, STATE], "readwrite");
+    tx.objectStore(STATE).put(record, id);
+    if (key) tx.objectStore(KEYS).put(key, id);
+    await done(tx);
+  }
+
   async remove(id: string): Promise<void> {
     const db = await this.open();
+    // An explicit erase takes this device's backups with it.
+    const prefix = id + BACKUP_MARK;
+    const keys = (await request(db.transaction(STATE).objectStore(STATE).getAllKeys())) as string[];
+    const stale = keys.filter((k) => typeof k === "string" && k.startsWith(prefix));
     const tx = db.transaction([KEYS, STATE], "readwrite");
-    tx.objectStore(KEYS).delete(id);
-    tx.objectStore(STATE).delete(id);
+    for (const k of [id, ...stale]) {
+      tx.objectStore(KEYS).delete(k);
+      tx.objectStore(STATE).delete(k);
+    }
     await done(tx);
   }
 

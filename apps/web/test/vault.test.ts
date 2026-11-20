@@ -4,6 +4,7 @@ import { AuthClient } from "../src/lib/auth.js";
 import { Controller } from "../src/lib/controller.js";
 import { Api, MemoryTokenStore } from "../src/lib/http.js";
 import { MemoryDevicePrefs } from "../src/lib/device.js";
+import { encodeBundle } from "../src/lib/e2ee.js";
 import { IdbStateVault } from "../src/lib/vault.js";
 
 const secret = new TextEncoder().encode("group secret: do not leak");
@@ -266,5 +267,133 @@ describe("Private and shared devices", () => {
     await c.connect();
     expect(c.getState().error).toBe("account_blocked");
     expect(await vault.load("u/d")).toEqual(secret);
+  });
+});
+
+describe("IdbStateVault.backup", () => {
+  it("copies state and key without touching the original, and restore brings it back", async () => {
+    const vault = new IdbStateVault(new IDBFactory());
+    await vault.save("u/d", secret);
+    const backupId = await vault.backup("u/d");
+    expect(backupId).not.toBeNull();
+    expect(await vault.load("u/d")).toEqual(secret);
+    await vault.save("u/d", new TextEncoder().encode("replacement"));
+    await vault.restore("u/d", backupId!);
+    expect(await vault.load("u/d")).toEqual(secret);
+  });
+
+  it("returns null when there is nothing to back up", async () => {
+    expect(await new IdbStateVault(new IDBFactory()).backup("u/d")).toBeNull();
+  });
+
+  it("an explicit erase removes the backups too, and other devices are left alone", async () => {
+    const idb = new IDBFactory();
+    const vault = new IdbStateVault(idb);
+    await vault.save("u/d", secret);
+    await vault.save("u/d2", secret);
+    await vault.backup("u/d");
+    await vault.backup("u/d2");
+    await vault.remove("u/d");
+    expect(await dump(idb, "state")).toHaveLength(2); // u/d2 and its backup
+    expect(await vault.load("u/d2")).toEqual(secret);
+  });
+});
+
+describe("Controller with unreadable saved history", () => {
+  const meta = { cursor: [], channelConv: [], sent: [], log: [] };
+  const ready = { userId: "u", seq: 0, servers: [] };
+
+  async function setup(stored: Uint8Array | null, createMls: () => never = () => { throw new Error("opened"); }) {
+    const idb = new IDBFactory();
+    const vault = new IdbStateVault(idb);
+    if (stored) await vault.save("u/d", stored);
+    const api = new Api({ baseUrl: "", store: new MemoryTokenStore(), fetch: async () => new Response("{}") });
+    const c = new Controller({ api, auth: new AuthClient(api), createMls, vault, gatewayUrl: "ws://h" });
+    (c as unknown as { deviceId: string }).deviceId = "d";
+    const onReady = () => (c as unknown as { onReady(r: unknown): Promise<void> }).onReady(ready);
+    return { vault, idb, c, onReady };
+  }
+
+  it("corrupt data is kept untouched and reported", async () => {
+    const { vault, c, onReady } = await setup(new TextEncoder().encode("not json {"));
+    await onReady();
+    expect(c.getState().vaultProblem).toBe("unreadable");
+    expect(c.getState().error).toBeNull();
+    expect(await vault.load("u/d")).toEqual(new TextEncoder().encode("not json {"));
+  });
+
+  it("a different bundle version is kept untouched and reported as such", async () => {
+    const other = new TextEncoder().encode(JSON.stringify({ v: 99, mls: "AA==", meta }));
+    const { vault, c, onReady } = await setup(other);
+    await onReady();
+    expect(c.getState().vaultProblem).toBe("unsupported_version");
+    expect(await vault.load("u/d")).toEqual(other);
+  });
+
+  it("saved state that the MLS client cannot open is kept, not replaced", async () => {
+    const good = encodeBundle(new Uint8Array([1, 2, 3]), meta);
+    const calls: (Uint8Array | null)[] = [];
+    const { vault, c, onReady } = await setup(good, ((_u: string, _d: string, saved: Uint8Array | null) => { calls.push(saved); throw new Error("bad state"); }) as never);
+    await onReady();
+    expect(c.getState().vaultProblem).toBe("unreadable");
+    expect(calls).toHaveLength(1); // never retried with a blank client
+    expect(await vault.load("u/d")).toEqual(good);
+  });
+
+  it("a vault that cannot be read at all does not start fresh either", async () => {
+    const { vault, c, onReady } = await setup(null);
+    vault.load = async () => { throw new Error("vault_unreadable"); };
+    await onReady();
+    expect(c.getState().vaultProblem).toBe("unreadable");
+  });
+
+  it("retry reads the saved history again and keeps it if it still will not open", async () => {
+    const good = encodeBundle(new Uint8Array([1]), meta);
+    let attempts = 0;
+    const { vault, c, onReady } = await setup(good, (() => { attempts++; throw new Error("temporary"); }) as never);
+    await onReady();
+    await c.retryVault();
+    expect(attempts).toBe(2);
+    expect(c.getState().vaultProblem).toBe("unreadable");
+    expect(await vault.load("u/d")).toEqual(good);
+  });
+
+  it("starting fresh backs the old data up before anything can replace it", async () => {
+    const bad = new TextEncoder().encode("garbage");
+    const { vault, idb, c, onReady } = await setup(bad);
+    await onReady();
+    // createMls throws here, which stops us right after the backup was taken.
+    await expect(c.startFresh()).rejects.toThrow("opened");
+    const states = (await dump(idb, "state")) as Uint8Array[];
+    expect(states).toHaveLength(2);
+    const ids = await new Promise<string[]>((resolve) => {
+      const open = idb.open("bastion-e2ee");
+      open.onsuccess = () => {
+        const req = open.result.transaction("state").objectStore("state").getAllKeys();
+        req.onsuccess = () => resolve(req.result as string[]);
+      };
+    });
+    const backupId = ids.find((i) => i.startsWith("u/d#backup-"))!;
+    expect(backupId).toBeDefined();
+    await vault.restore("u/d", backupId);
+    await expect(vault.load("u/d")).resolves.toEqual(bad);
+  });
+
+  it("if the backup fails, nothing changes and the problem stays", async () => {
+    const { vault, c, onReady } = await setup(new TextEncoder().encode("garbage"));
+    await onReady();
+    vault.backup = async () => { throw new Error("idb"); };
+    await c.startFresh();
+    expect(c.getState().vaultProblem).toBe("unreadable");
+    expect(c.getState().error).toBe("could_not_back_up_device_data");
+  });
+
+  it("a plain sign-out while the problem is showing erases nothing", async () => {
+    const { vault, c, onReady } = await setup(new TextEncoder().encode("garbage"));
+    await onReady();
+    await c.signOut();
+    expect(c.getState().vaultProblem).toBeNull();
+    expect(await vault.load("u/d")).toEqual(new TextEncoder().encode("garbage"));
+    expect(await vault.backup("u/d")).not.toBeNull(); // the record is still there
   });
 });

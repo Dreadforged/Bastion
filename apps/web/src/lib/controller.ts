@@ -34,6 +34,11 @@ export interface AppState {
   incomingCalls: schemas.DmCall[];
   /** Something about a call worth showing: a stable code, not a sentence. Cleared by dismissCallNotice. */
   callNotice: string | null;
+  /**
+   * Set when this device's saved encrypted history could not be opened. It is left
+   * untouched; the UI should say so and offer `retryVault` or `startFresh`.
+   */
+  vaultProblem: "unreadable" | "unsupported_version" | null;
   /** Last error to show, cleared by the next action. */
   error: string | null;
 }
@@ -68,6 +73,7 @@ export class Controller {
     voice: null,
     incomingCalls: [],
     callNotice: null,
+    vaultProblem: null,
     error: null,
   };
   private listeners = new Set<() => void>();
@@ -76,6 +82,7 @@ export class Controller {
   private deviceId: string | null = null;
   /** Where this device's encrypted state lives in the vault, once the user is known. */
   private vaultId: string | null = null;
+  private pendingE2ee: { userId: string; deviceId: string } | null = null;
   private voiceService: VoiceService | null = null;
   private ringTimer: ReturnType<typeof setTimeout> | null = null;
   /** What each conversation turned out to be, so a call group is never shown as a chat. */
@@ -237,44 +244,83 @@ export class Controller {
   private async onReady(ready: ReadyPayload) {
     this.set((s) => ({ phase: "ready", chat: applyReady(s.chat, ready) }));
     if (!this.e2ee && this.deviceId) {
-      const deviceId = this.deviceId;
-      const vaultId = `${ready.userId}/${deviceId}`;
-      this.vaultId = vaultId;
-      const vault = this.o.vault;
-      let saved: { mls: Uint8Array; meta: PersistedMeta } | null = null;
-      if (vault) {
-        try {
-          const raw = await vault.load(vaultId);
-          saved = raw ? decodeBundle(raw) : null;
-        } catch {
-          // Unreadable or from another version: start this device's groups afresh.
-          saved = null;
-        }
-      }
-      let mls: MlsClient;
-      try {
-        mls = await this.o.createMls(ready.userId, deviceId, saved?.mls ?? null);
-      } catch (err) {
-        if (!saved) throw err;
-        saved = null;
-        mls = await this.o.createMls(ready.userId, deviceId, null);
-      }
-      // Signed out while loading: do not bring anything back.
-      if (this.state.phase === "signed-out") return;
-      this.e2ee = new E2ee({
-        api: this.o.api,
-        userId: ready.userId,
-        deviceId,
-        mls,
-        ...(saved ? { restored: saved.meta } : {}),
-        ...(vault ? { persist: (bundle: Uint8Array) => vault.save(vaultId, bundle) } : {}),
-        onPersistError: () => this.set({ error: "could_not_save_encryption_state" }),
-      });
-      this.voiceService = this.makeVoice(this.e2ee);
-      await this.guard(() => this.e2ee!.publishKeys());
-      // A reload starts with no chats on screen: bring back the DMs whose history this device kept.
-      for (const id of this.e2ee.loggedConversations()) void this.onConversationUpdate(id);
+      this.vaultId = `${ready.userId}/${this.deviceId}`;
+      this.pendingE2ee = { userId: ready.userId, deviceId: this.deviceId };
+      await this.startE2ee(false);
     }
+  }
+
+  /**
+   * Bring up this device's encryption from the vault. If saved state exists but can't
+   * be read (damaged, or written by another version), nothing is started and nothing
+   * is written: the old data stays exactly as it is and `vaultProblem` tells the UI.
+   * Only `startFresh` may go on without it, and it backs the old data up first.
+   */
+  private async startE2ee(fresh: boolean): Promise<void> {
+    const pending = this.pendingE2ee;
+    const vaultId = this.vaultId;
+    if (!pending || !vaultId || this.e2ee) return;
+    const { userId, deviceId } = pending;
+    const vault = this.o.vault;
+    let saved: { mls: Uint8Array; meta: PersistedMeta } | null = null;
+    if (vault && !fresh) {
+      try {
+        const raw = await vault.load(vaultId);
+        saved = raw ? decodeBundle(raw) : null;
+      } catch (err) {
+        this.set({ vaultProblem: err instanceof Error && err.message === "bundle_unsupported" ? "unsupported_version" : "unreadable" });
+        return;
+      }
+    }
+    let mls: MlsClient;
+    try {
+      mls = await this.o.createMls(userId, deviceId, saved?.mls ?? null);
+    } catch (err) {
+      if (!saved) throw err;
+      // The saved state would not open. Keep it; do not replace it with a blank one.
+      this.set({ vaultProblem: "unreadable" });
+      return;
+    }
+    // Signed out while loading: do not bring anything back.
+    if (this.state.phase === "signed-out") return;
+    this.set({ vaultProblem: null });
+    this.e2ee = new E2ee({
+      api: this.o.api,
+      userId,
+      deviceId,
+      mls,
+      ...(saved ? { restored: saved.meta } : {}),
+      ...(vault ? { persist: (bundle: Uint8Array) => vault.save(vaultId, bundle) } : {}),
+      onPersistError: () => this.set({ error: "could_not_save_encryption_state" }),
+    });
+    this.voiceService = this.makeVoice(this.e2ee);
+    await this.guard(() => this.e2ee!.publishKeys());
+    // A reload starts with no chats on screen: bring back the DMs whose history this device kept.
+    for (const id of this.e2ee.loggedConversations()) void this.onConversationUpdate(id);
+  }
+
+  /** Try the saved history again (after a refresh, or if the problem was temporary). */
+  async retryVault(): Promise<void> {
+    if (!this.state.vaultProblem) return;
+    this.set({ vaultProblem: null, error: null });
+    await this.startE2ee(false);
+  }
+
+  /**
+   * The person chose to carry on without the history that would not open. Their old
+   * data is copied to a backup slot first and only then can a new state be written.
+   * If the backup fails, nothing changes.
+   */
+  async startFresh(): Promise<void> {
+    if (!this.state.vaultProblem || !this.vaultId) return;
+    try {
+      await this.o.vault?.backup(this.vaultId);
+    } catch {
+      this.set({ error: "could_not_back_up_device_data" });
+      return;
+    }
+    this.set({ vaultProblem: null, error: null });
+    await this.startE2ee(true);
   }
 
   private makeVoice(e2ee: E2ee): VoiceService | null {
@@ -402,12 +448,13 @@ export class Controller {
     this.deviceId = null;
     const vaultId = this.vaultId;
     this.vaultId = null;
+    this.pendingE2ee = null;
     const voice = this.voiceService;
     this.voiceService = null;
     if (this.ringTimer) clearTimeout(this.ringTimer);
     this.ringTimer = null;
     this.convInfo.clear();
-    this.set({ phase: "signed-out", gate: null, chat: emptyState, plaintext: {}, dms: {}, voice: null, incomingCalls: [], callNotice: null, gateway: "idle" });
+    this.set({ phase: "signed-out", gate: null, chat: emptyState, plaintext: {}, dms: {}, voice: null, incomingCalls: [], callNotice: null, vaultProblem: null, gateway: "idle" });
     await voice?.reset();
     // Let queued saves land first, otherwise one could write state back after an erase.
     await e2ee?.close();
