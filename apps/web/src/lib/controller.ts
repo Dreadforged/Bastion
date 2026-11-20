@@ -425,7 +425,8 @@ export class Controller {
     for (const m of messages) {
       if (m.id in this.state.plaintext && this.state.plaintext[m.id] !== null) continue;
       const payload = await this.e2ee.decryptChannelMessage(m);
-      this.set((s) => ({ plaintext: { ...s.plaintext, [m.id]: payload } }));
+      // Our own send can finish while this was waiting; don't wipe what it stored.
+      this.set((s) => (payload === null && s.plaintext[m.id] ? {} : { plaintext: { ...s.plaintext, [m.id]: payload } }));
     }
   }
 
