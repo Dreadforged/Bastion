@@ -1,4 +1,4 @@
-import { StrictMode } from "react";
+import { lazy, StrictMode, Suspense } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App.js";
 import { AuthClient } from "./lib/auth.js";
@@ -8,6 +8,10 @@ import { IdbStateVault } from "./lib/vault.js";
 import { createMlsClient } from "./lib/wasm.js";
 import { liveKitCallOptions } from "./voice/livekit-room.js";
 import "./ui/styles.css";
+
+// Local testing picker. Vite replaces import.meta.env.DEV with false in production builds, so the
+// import below is dropped from them.
+const DevPicker = import.meta.env.DEV ? lazy(() => import("./ui/DevPicker.js")) : null;
 
 const root = document.getElementById("root");
 if (!root) throw new Error("missing #root element");
@@ -23,6 +27,10 @@ void controller.start();
 
 createRoot(root).render(
   <StrictMode>
-    <App controller={controller} auth={auth} />
+    <App
+      controller={controller}
+      auth={auth}
+      devTools={DevPicker ? <Suspense fallback={null}><DevPicker api={api} controller={controller} /></Suspense> : null}
+    />
   </StrictMode>,
 );
