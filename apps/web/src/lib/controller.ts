@@ -240,6 +240,8 @@ export class Controller {
       });
       this.voiceService = this.makeVoice(this.e2ee);
       await this.guard(() => this.e2ee!.publishKeys());
+      // A reload starts with no chats on screen: bring back the DMs whose history this device kept.
+      for (const id of this.e2ee.loggedConversations()) void this.onConversationUpdate(id);
     }
   }
 

@@ -137,10 +137,12 @@ export class Api {
   }
 
   async request<T>(method: string, path: string, options: RequestOptions = {}): Promise<T> {
+    // Every signed-in write needs a key. Make one per call, so the retry after a token refresh reuses it.
+    const key = options.idempotencyKey ?? (method !== "GET" && !options.anonymous ? newIdempotencyKey() : undefined);
     const send = async (): Promise<Response> => {
       const headers: Record<string, string> = {};
       if (options.body !== undefined) headers["content-type"] = "application/json";
-      if (options.idempotencyKey) headers["idempotency-key"] = options.idempotencyKey;
+      if (key) headers["idempotency-key"] = key;
       if (!options.anonymous) {
         const token = await this.accessToken();
         if (token) headers["authorization"] = `Bearer ${token}`;

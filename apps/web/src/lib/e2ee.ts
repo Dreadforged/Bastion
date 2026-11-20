@@ -304,6 +304,11 @@ export class E2ee {
     await this.persist();
   }
 
+  /** Conversations this device already holds readable messages for (what a reload brings back). */
+  loggedConversations(): string[] {
+    return [...this.log.keys()];
+  }
+
   messages(conversationId: string): DecryptedMessage[] {
     return this.log.get(conversationId) ?? [];
   }
