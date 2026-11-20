@@ -291,7 +291,11 @@ function DmList({ controller, state, view, onOpen }: { controller: Controller; s
         ))}
       </ul>
       <p className="hint">Open a server and choose Message next to someone to start a private conversation.</p>
-      <p className="hint">Encrypted conversations are kept in memory only, so they reset when you reload.</p>
+      <p className="hint">
+        Encrypted conversations are stored only on this device. On a private device, signing out keeps them here and they come back when you sign in again with your
+        passkey. On a shared device, signing out erases them. You can change this, or erase them now, in Privacy. Erased messages cannot be recovered, and a new device
+        never sees old messages.
+      </p>
     </>
   );
 }

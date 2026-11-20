@@ -2,6 +2,7 @@ import { newId, Permission, computePermissions, EventPayloads, type EventName, t
 import type { CallOptions, QualityTier } from "../voice/call.js";
 import { VoiceService, type VoiceUi } from "../voice/service.js";
 import { AuthClient } from "./auth.js";
+import type { DeviceKind, DevicePrefs } from "./device.js";
 import { decodeBundle, E2ee, type DecryptedMessage, type MlsClient, type PersistedMeta } from "./e2ee.js";
 import { Gateway, type GatewayOptions, type GatewayStatus } from "./gateway.js";
 import { Api, ApiError, newIdempotencyKey } from "./http.js";
@@ -44,6 +45,8 @@ export interface ControllerOptions {
   createMls: (userId: string, deviceId: string, saved: Uint8Array | null) => MlsClient | Promise<MlsClient>;
   /** Encrypted storage for MLS state. Without it, state lives in memory only. */
   vault?: StateVault;
+  /** Private or shared device. Without it every device counts as private and nobody is asked. */
+  devicePrefs?: DevicePrefs;
   /** LiveKit room factory for voice. Without it voice and calls are unavailable. */
   voiceRoom?: Pick<CallOptions, "createRoom" | "createSink" | "e2eeSupported">;
   gatewayUrl: string;
@@ -71,6 +74,8 @@ export class Controller {
   private gateway: Gateway | null = null;
   private e2ee: E2ee | null = null;
   private deviceId: string | null = null;
+  /** Where this device's encrypted state lives in the vault, once the user is known. */
+  private vaultId: string | null = null;
   private voiceService: VoiceService | null = null;
   private ringTimer: ReturnType<typeof setTimeout> | null = null;
   /** What each conversation turned out to be, so a call group is never shown as a chat. */
@@ -119,12 +124,12 @@ export class Controller {
       gate = gateFor(await this.o.api.get<schemas.AccountSafety>("/account/safety"));
     } catch (err) {
       // A blocked account fails at the token check; anything else is a failed load. Either way, no app.
-      await this.reset();
+      await this.reset(false);
       this.set({ error: err instanceof ApiError ? err.code : "something_went_wrong" });
       return;
     }
     if (gate?.kind === "blocked") {
-      await this.reset();
+      await this.reset(false);
       this.set({ error: "account_blocked" });
       return;
     }
@@ -132,7 +137,32 @@ export class Controller {
       this.set({ phase: "safety-gate", gate });
       return;
     }
+    await this.proceed();
+  }
+
+  /** The last step before the app opens: ask once whether this is a private or shared device. */
+  private async proceed(): Promise<void> {
+    if (this.o.devicePrefs && this.o.devicePrefs.load() === null) {
+      this.set({ phase: "safety-gate", gate: { kind: "device" } });
+      return;
+    }
     await this.openGateway();
+  }
+
+  /** Answer the "private or shared device?" question and carry on. */
+  async chooseDevice(kind: DeviceKind): Promise<void> {
+    this.o.devicePrefs?.save(kind);
+    if (this.state.gate?.kind === "device") await this.openGateway();
+  }
+
+  /** What this browser is set to; private if nobody has been asked. */
+  deviceKind(): DeviceKind {
+    return this.o.devicePrefs?.load() ?? "private";
+  }
+
+  setDeviceKind(kind: DeviceKind): void {
+    this.o.devicePrefs?.save(kind);
+    this.set({});
   }
 
   /** Age declaration for the sign-up gate. The server keeps only the band. */
@@ -143,7 +173,7 @@ export class Controller {
       await this.afterGate(safety);
     } catch (err) {
       if (err instanceof ApiError && err.code === "underage") {
-        await this.reset();
+        await this.reset(false);
         this.set({ error: "underage" });
         return;
       }
@@ -172,10 +202,11 @@ export class Controller {
   private async afterGate(safety: schemas.AccountSafety): Promise<void> {
     const gate = gateFor(safety);
     if (gate?.kind === "blocked") {
-      await this.signOut();
+      // Our decision, not the person's: never erase anything for it.
+      await this.endSession(false);
       this.set({ error: "account_blocked" });
     } else if (gate) this.set({ gate });
-    else await this.openGateway();
+    else await this.proceed();
   }
 
   private async openGateway(): Promise<void> {
@@ -196,7 +227,7 @@ export class Controller {
         onStatus: (gateway) => {
           this.set({ gateway });
           // The server ended our session (sign-out elsewhere, device revoked).
-          if (gateway === "ended" && this.state.phase !== "signed-out") void this.reset();
+          if (gateway === "ended" && this.state.phase !== "signed-out") void this.reset(false);
         },
       },
     );
@@ -208,6 +239,7 @@ export class Controller {
     if (!this.e2ee && this.deviceId) {
       const deviceId = this.deviceId;
       const vaultId = `${ready.userId}/${deviceId}`;
+      this.vaultId = vaultId;
       const vault = this.o.vault;
       let saved: { mls: Uint8Array; meta: PersistedMeta } | null = null;
       if (vault) {
@@ -324,19 +356,52 @@ export class Controller {
     if (Number.isFinite(next)) this.ringTimer = setTimeout(() => this.refreshRinging(), Math.max(0, next - Date.now()) + 50);
   }
 
+  /**
+   * The person signed out. On a private device the encrypted history stays in the
+   * vault and opens again when the same account signs in with the same passkey here.
+   * On a shared device it is erased, because they said other people use this browser.
+   */
   async signOut(): Promise<void> {
-    this.gateway?.close();
-    await this.o.auth.signOut().catch(() => undefined);
-    await this.reset();
+    // With no account known yet there is nothing of theirs to erase.
+    await this.endSession(this.deviceKind() === "shared" && this.vaultId !== null);
   }
 
-  /** Back to signed-out: drop in-memory state and wipe the stored keys and group state. */
-  private async reset(): Promise<void> {
+  /**
+   * Sign out and delete this account's encrypted history and keys from this device.
+   * Only ever called from an explicit, confirmed action. Past messages cannot be
+   * read here again afterwards (there is no server copy to restore from).
+   */
+  async signOutAndErase(): Promise<void> {
+    await this.endSession(true);
+  }
+
+  /**
+   * The server ended our session (expired, revoked, signed out elsewhere, services
+   * patched). That is never the person's choice, so it never erases anything, even
+   * on a shared device.
+   */
+  async sessionEnded(): Promise<void> {
+    await this.reset(false);
+  }
+
+  private async endSession(erase: boolean): Promise<void> {
+    this.gateway?.close();
+    await this.o.auth.signOut().catch(() => undefined);
+    await this.reset(erase);
+  }
+
+  /**
+   * Back to signed-out: drop in-memory state. `erase` also deletes the stored keys and
+   * group state; without it they stay on the device, encrypted, for the next sign-in.
+   */
+  private async reset(erase: boolean): Promise<void> {
     this.gateway?.close();
     this.gateway = null;
     const e2ee = this.e2ee;
     this.e2ee = null;
     this.deviceId = null;
+    const vaultId = this.vaultId;
+    this.vaultId = null;
     const voice = this.voiceService;
     this.voiceService = null;
     if (this.ringTimer) clearTimeout(this.ringTimer);
@@ -344,9 +409,15 @@ export class Controller {
     this.convInfo.clear();
     this.set({ phase: "signed-out", gate: null, chat: emptyState, plaintext: {}, dms: {}, voice: null, incomingCalls: [], callNotice: null, gateway: "idle" });
     await voice?.reset();
-    // Let queued saves land first, otherwise one could write state back after the wipe.
+    // Let queued saves land first, otherwise one could write state back after an erase.
     await e2ee?.close();
-    await this.o.vault?.clear().catch(() => undefined);
+    if (!erase || !this.o.vault) return;
+    try {
+      // Only this account's state. If we never got as far as knowing it, erase everything here.
+      await (vaultId ? this.o.vault.remove(vaultId) : this.o.vault.clear());
+    } catch {
+      this.set({ error: "could_not_erase_device_data" });
+    }
   }
 
   // ---------------------------------------------------------------- servers and channels
@@ -493,7 +564,8 @@ export class Controller {
       return err instanceof ApiError ? err.code : "something_went_wrong";
     }
     this.o.api.setTokens(null);
-    await this.reset();
+    // The account and its device are gone, so this state can never be used again.
+    await this.reset(true);
     return null;
   }
 

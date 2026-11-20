@@ -29,6 +29,7 @@ export function Settings({ controller }: { controller: Controller }) {
   }
 
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmErase, setConfirmErase] = useState(false);
   async function deleteAccount() {
     setMessage(null);
     const refusal = await controller.deleteAccount();
@@ -96,6 +97,33 @@ export function Settings({ controller }: { controller: Controller }) {
         <button onClick={() => void exportAccount()}>Export my account data</button>
         <button onClick={() => downloadJson("bastion-messages-export.json", controller.chatExport())}>Export messages on this device</button>
       </div>
+
+      <h3>This device</h3>
+      <p className="hint">
+        Your encrypted messages are stored only on this device. On a private device, signing out keeps them here and they come back when
+        you sign in again with your passkey. On a shared device, signing out erases them.
+      </p>
+      <label>
+        This browser is a{" "}
+        <select value={controller.deviceKind()} onChange={(e) => controller.setDeviceKind(e.target.value as "private" | "shared")}>
+          <option value="private">Private: keep messages</option>
+          <option value="shared">Shared: erase on sign-out</option>
+        </select>
+      </label>
+
+      <h3 id="erase-device">Erase messages from this device</h3>
+      <p className="hint">
+        This signs you out and deletes your encrypted messages and keys from this browser, whatever the setting above. We have no copy, so
+        they cannot be restored, and they stay on other people's devices.
+      </p>
+      {!confirmErase ? (
+        <button onClick={() => setConfirmErase(true)}>Sign out and erase this device…</button>
+      ) : (
+        <div className="controls">
+          <button onClick={() => void controller.signOutAndErase()}>Yes, erase and sign out</button>
+          <button onClick={() => setConfirmErase(false)}>Cancel</button>
+        </div>
+      )}
 
       <h3>Delete your account</h3>
       <p className="hint">

@@ -12,6 +12,8 @@ export type Gate =
   | { kind: "too_young" }
   | { kind: "review" }
   | { kind: "declare" }
+  /** Not from the server: asked last, once per browser (see lib/device.ts). */
+  | { kind: "device" }
   | { kind: "terms"; outstanding: schemas.AccountSafety["termsOutstanding"] };
 
 export function gateFor(safety: schemas.AccountSafety): Gate | null {
