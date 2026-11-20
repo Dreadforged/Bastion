@@ -213,7 +213,10 @@ function ChannelView({ controller, state, serverId, channelId }: { controller: C
   const canModerate = controller.can(serverId, channelId, Permission.MANAGE_MESSAGES);
   const me = state.chat.userId;
   const bottom = useRef<HTMLDivElement>(null);
-  useEffect(() => bottom.current?.scrollIntoView?.({ block: "end" }), [messages.length]);
+  // Braces matter: an arrow returning scrollIntoView's result would hand React a non-function cleanup.
+  useEffect(() => {
+    bottom.current?.scrollIntoView?.({ block: "end" });
+  }, [messages.length]);
   if (!channel) return <p className="empty">This channel is gone.</p>;
 
   return (
