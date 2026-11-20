@@ -9,12 +9,12 @@ button.link { background: none; border: 0; padding: 0 .25rem; color: LinkText; t
 .auth input { padding: .5rem; }
 .auth button:not(.link) { padding: .6rem 1rem; }
 .code { font-size: 1.2rem; padding: 1rem; border: 1px solid; user-select: all; }
-.shell { display: grid; grid-template-columns: 4rem 14rem 1fr 14rem; height: 100vh; }
+.shell { display: grid; grid-template-columns: 5rem 14rem minmax(0, 1fr) 14rem; height: 100vh; }
 .shell > * { overflow: auto; }
 .rail { display: flex; flex-direction: column; gap: .5rem; padding: .5rem; border-right: 1px solid #8884; }
-.rail button { height: 2.75rem; border-radius: .6rem; border: 1px solid #8886; }
+.rail button { height: 2.75rem; border-radius: .6rem; border: 1px solid #8886; padding: 0 .25rem; min-width: 0; font-size: .75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rail button.active, .sidebar button.active { outline: 2px solid highlight; }
-.rail .signout { margin-top: auto; height: auto; font-size: .7rem; }
+.rail .signout { margin-top: auto; height: auto; padding: .35rem .25rem; font-size: .7rem; white-space: normal; overflow-wrap: anywhere; }
 .sidebar, .members { padding: .75rem; border-right: 1px solid #8884; }
 .members { border-right: 0; border-left: 1px solid #8884; }
 .sidebar ul, .members ul { list-style: none; padding: 0; margin: 0; }
@@ -48,3 +48,21 @@ button.link { background: none; border: 0; padding: 0 .25rem; color: LinkText; t
 .settings { padding: 1rem; overflow: auto; max-width: 40rem; }
 .settings h3 { margin: 1.25rem 0 .25rem; font-size: 1rem; }
 .settings .controls { display: flex; flex-wrap: wrap; gap: .5rem; }
+
+.dev-picker { max-width: 26rem; margin: 0 auto 4rem; padding: 0 1rem; display: grid; gap: .5rem; border-top: 1px dashed currentColor; }
+.dev-picker ul { list-style: none; padding: 0; margin: 0; display: grid; gap: .4rem; }
+
+/* long names and text stay inside their boxes */
+.sidebar h2, .members h3, .content header h2 { overflow-wrap: anywhere; }
+.sidebar li button { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar li button.link { white-space: normal; }
+.members li { overflow-wrap: anywhere; }
+.sidebar, .members { min-width: 0; overflow-x: hidden; }
+.sidebar button, .members button, .content header button, .composer button { max-width: 100%; }
+.composer input { min-width: 0; }
+.hint, .status, .error, .callbar, .call-alerts, .typing, .empty { overflow-wrap: anywhere; }
+.settings, .settings p, .settings li { overflow-wrap: anywhere; }
+.auth, .auth p, .dev-picker { overflow-wrap: anywhere; }
+.code { overflow-wrap: anywhere; }
+.content header { min-width: 0; }
+.content header.with-action h2 { min-width: 0; margin-right: .5rem; }
