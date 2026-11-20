@@ -33,3 +33,7 @@ Thumbs.db
 # Logs and coverage
 *.log
 coverage/
+
+# visual test output
+apps/web/e2e/results/
+apps/web/e2e/screenshots/
