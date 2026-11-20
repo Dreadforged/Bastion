@@ -37,3 +37,10 @@ coverage/
 # visual test output
 apps/web/e2e/results/
 apps/web/e2e/screenshots/
+
+# local only
+docs/crypto-review-brief.md
+docs/encryption-review-brief.md
+docs/safety-and-compliance-plan.md
+docs/launch-checklist.md
+docs/streaming-gap-analysis.md
