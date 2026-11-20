@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { tokenFromHash, type AuthClient } from "../lib/auth.js";
 import type { Controller } from "../lib/controller.js";
 import { errorText } from "./SafetyGate.js";
@@ -11,7 +11,7 @@ function defaultDeviceName(): string {
   return `${browser} on ${navigator.platform || "this device"}`.slice(0, 64);
 }
 
-export function AuthScreen({ controller, auth, notice }: { controller: Controller; auth: AuthClient; notice?: string | null }) {
+export function AuthScreen({ controller, auth, notice, devTools = null }: { controller: Controller; auth: AuthClient; notice?: string | null; devTools?: ReactNode }) {
   const [mode, setMode] = useState<Mode>("sign-in");
   const [email, setEmail] = useState("");
   const [sent, setSent] = useState(false);
@@ -105,6 +105,7 @@ export function AuthScreen({ controller, auth, notice }: { controller: Controlle
       {sent && <p>Check your email for a link. It expires in 15 minutes.</p>}
       {error && <p role="alert" className="error">{error}</p>}
       {!error && notice && <p role="alert" className="error">{errorText(notice)}</p>}
+      {devTools}
     </main>
   );
 }
