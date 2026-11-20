@@ -16,10 +16,17 @@ ENVIRONMENT = "development"
 RP_ID = "localhost"
 RP_NAME = "Bastion (dev)"
 APP_ORIGIN = "http://localhost:5173"
+# Turns on the /dev sign-in and seed routes (see docs/local-testing.md). Local only: it must never
+# appear in an [env.*] block, and test/dev-gate.test.ts fails if it does.
+DEV_SEED = "local"
 # Staff admin tool (/staff), behind Cloudflare Access. Leave unset and the routes answer 404.
 # STAFF_ACCESS_TEAM_DOMAIN = "yourteam.cloudflareaccess.com"
 # STAFF_ACCESS_AUDIENCE = "<the Access application AUD tag>"
 # STAFF_EMAILS = "a@example.com,b@example.com"   # optional second check
+
+# Compiled into the bundle. True here, false in staging and production, so the dev code is removed there.
+[define]
+__BASTION_LOCAL_DEV__ = "true"
 
 [[durable_objects.bindings]]
 name = "USER_SESSION"
@@ -71,6 +78,9 @@ name = "bastion-api-staging"
 ENVIRONMENT = "staging"
 # TODO: set RP_ID, RP_NAME and APP_ORIGIN once the staging domain is chosen.
 
+[env.staging.define]
+__BASTION_LOCAL_DEV__ = "false"
+
 [[env.staging.durable_objects.bindings]]
 name = "USER_SESSION"
 class_name = "UserSession"
@@ -116,6 +126,9 @@ name = "bastion-api-production"
 [env.production.vars]
 ENVIRONMENT = "production"
 # TODO: set RP_ID, RP_NAME and APP_ORIGIN once the production domain is chosen.
+
+[env.production.define]
+__BASTION_LOCAL_DEV__ = "false"
 
 [[env.production.durable_objects.bindings]]
 name = "USER_SESSION"

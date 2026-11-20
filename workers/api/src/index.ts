@@ -16,7 +16,9 @@ import { NoopScanner } from "./files/scanner.js";
 import { R2S3Signer } from "./files/presign.js";
 import { cleanupPendingFiles, handleFiles } from "./files/routes.js";
 import { handleFileServe } from "./files/serve.js";
-import { cleanupInviteCodes, cleanupLiveStreams, handleServers } from "./servers/routes.js";
+import { cleanupInviteCodes, cleanupLiveStreams, handleServers, type ServerRouteDeps } from "./servers/routes.js";
+import { devOriginOk, devSeedAllowed } from "./dev/gate.js";
+import { devStaffAuth, handleDev } from "./dev/routes.js";
 import { HttpLiveKitAdmin, type VoiceDeps } from "./voice/livekit.js";
 import type { Conversation, Server, UserSession } from "@bastion/durable";
 
@@ -60,7 +62,14 @@ export interface Env {
   STAFF_ACCESS_TEAM_DOMAIN?: string;
   STAFF_ACCESS_AUDIENCE?: string;
   STAFF_EMAILS?: string;
+  /** Local dev only: "local" turns on the /dev routes. Only the top-level (local) wrangler.toml sets it. */
+  DEV_SEED?: string;
 }
+
+// __BASTION_LOCAL_DEV__ comes from [define] in wrangler.toml: true locally, false in staging and
+// production. The test is written out inline wherever it is needed (not behind a constant or a
+// function) so the bundler folds it and drops the dev code from staging and production bundles.
+// Undefined, as under vitest, counts as false.
 
 let staffAuth: StaffAuth | undefined;
 function staffFor(env: Env): StaffAuth | undefined {
@@ -93,6 +102,20 @@ function deletionPorts(env: Env): Omit<DeletionPorts, "db" | "now"> {
   };
 }
 
+function serverDeps(env: Env): ServerRouteDeps {
+  const conversation = (id: string) => env.CONVERSATION.get(env.CONVERSATION.idFromName(id));
+  return {
+    db: env.DB,
+    servers: env.SERVER,
+    sessions: env.USER_SESSION,
+    now: Date.now,
+    flags: flagsFor(env),
+    userLimit: env.API_RATE_LIMIT,
+    revokeConversationAccess: (conversationId, userId) => conversation(conversationId).revoke([userId]),
+    voice: voiceDeps(env),
+  };
+}
+
 function voiceDeps(env: Env): VoiceDeps | undefined {
   if (!env.LIVEKIT_URL || !env.LIVEKIT_API_KEY || !env.LIVEKIT_API_SECRET) return undefined;
   const config = { url: env.LIVEKIT_URL, apiKey: env.LIVEKIT_API_KEY, apiSecret: env.LIVEKIT_API_SECRET };
@@ -113,6 +136,19 @@ export default {
 
     if (url.pathname === "/health") {
       return json({ ok: true, environment: env.ENVIRONMENT });
+    }
+
+    // Local dev sign-in and seed data. Compiled out of staging and production builds, and closed unless
+    // every condition in dev/gate.ts holds. Anywhere else these paths fall through to "not found".
+    if (typeof __BASTION_LOCAL_DEV__ !== "undefined" && __BASTION_LOCAL_DEV__ === true && url.pathname.startsWith("/dev/") && devSeedAllowed(env, request.url, true)) {
+      if (!devOriginOk(request, env.APP_ORIGIN)) return json({ error: "forbidden" }, 403);
+      const handled = await handleDev(request, {
+        db: env.DB,
+        flags: flagsFor(env),
+        now: Date.now,
+        api: async (req) => (await handleServers(req, serverDeps(env))) ?? json({ error: "not found" }, 404),
+      });
+      if (handled) return handled;
     }
 
     // The files domain only serves signed file URLs. Nothing else is reachable on it.
@@ -148,7 +184,7 @@ export default {
 
     const staff = await handleStaff(request, {
       db: env.DB,
-      staff: staffFor(env),
+      staff: staffFor(env) ?? (typeof __BASTION_LOCAL_DEV__ !== "undefined" && __BASTION_LOCAL_DEV__ === true && devSeedAllowed(env, request.url, true) ? devStaffAuth() : undefined),
       flags: flagsFor(env),
       now: Date.now,
       onAccountChange: async (userId, state) => {
@@ -165,16 +201,7 @@ export default {
     const account = await handleAccount(request, { db: env.DB, sessions: env.USER_SESSION, now: Date.now, userLimit: env.API_RATE_LIMIT, flags: flagsFor(env), deletion: deletionPorts(env) });
     if (account) return account;
 
-    const servers = await handleServers(request, {
-      db: env.DB,
-      servers: env.SERVER,
-      sessions: env.USER_SESSION,
-      now: Date.now,
-      flags: flagsFor(env),
-      userLimit: env.API_RATE_LIMIT,
-      revokeConversationAccess: (conversationId, userId) => conversation(conversationId).revoke([userId]),
-      voice: voiceDeps(env),
-    });
+    const servers = await handleServers(request, serverDeps(env));
     if (servers) return servers;
 
     if (env.FILES_ORIGIN && env.FILE_URL_SECRET && env.R2_ACCOUNT_ID && env.R2_ACCESS_KEY_ID && env.R2_SECRET_ACCESS_KEY && env.R2_BUCKET_NAME) {
