@@ -20,6 +20,18 @@ describe("Api", () => {
     expect((init.headers as Record<string, string>)["idempotency-key"]).toBe("key-12345678");
   });
 
+  it("adds an idempotency key to writes, but not reads or sign-in", async () => {
+    const fetch = vi.fn(async () => json(200, { ok: true }));
+    const api = new Api({ baseUrl: "http://h", store: new MemoryTokenStore(tokens("a", Date.now() + 1e6)), fetch });
+    await api.post("/servers/s1/invites", {});
+    await api.get("/servers");
+    await api.post("/auth/login", {}, { anonymous: true });
+    const sent = (i: number) => ((fetch.mock.calls[i] as unknown as [string, RequestInit])[1].headers as Record<string, string>)["idempotency-key"];
+    expect(sent(0)).toMatch(/^[A-Za-z0-9_-]{16,}$/);
+    expect(sent(1)).toBeUndefined();
+    expect(sent(2)).toBeUndefined();
+  });
+
   it("refreshes once for many concurrent requests when the token is about to lapse", async () => {
     let refreshes = 0;
     const fetch = vi.fn(async (url: string | URL | Request) => {

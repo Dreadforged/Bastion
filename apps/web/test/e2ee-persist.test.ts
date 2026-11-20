@@ -57,6 +57,8 @@ describe.skipIf(!built)("E2ee persistence, removal and rollback", () => {
     const alice2 = make("ALICE", "A1");
     const bob2 = make("BOB", "B1");
     expect(alice2.messages(conv.id).map((m) => m.payload.text)).toEqual(["before reload", "bob before"]);
+    // The controller uses this to put the DM back on screen after a reload.
+    expect(alice2.loggedConversations()).toEqual([conv.id]);
 
     await alice2.send(conv.id, "after reload");
     await bob2.sync(conv.id);
