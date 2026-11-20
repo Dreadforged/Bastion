@@ -59,7 +59,9 @@ async function check(page: Page, label: string, size: string) {
   expect(await findOverflow(page), `${label} at ${size}`).toEqual([]);
 }
 
-async function signInAs(page: Page, handle: string) {
+async function signInAs(page: Page, handle: string, answer: "private" | "shared" | null = "private") {
+  // The device question is asked once per browser; most checks answer it up front.
+  if (answer) await page.addInitScript((a) => localStorage.setItem("bastion.device-kind", a), answer);
   await page.goto("/");
   await page.getByRole("button", { name: `Sign in as ${handle}` }).click();
   await expect(page.getByRole("navigation", { name: "Servers" })).toBeVisible();
@@ -94,6 +96,23 @@ for (const size of sizes) {
 
       await rail.getByRole("button", { name: "Privacy", exact: true }).click();
       await check(page, "privacy", size.name);
+
+      // The erase section sits below the fold: scroll to it, then check and look at it.
+      await page.getByRole("heading", { name: "Erase messages from this device" }).scrollIntoViewIfNeeded();
+      await page.getByRole("button", { name: "Sign out and erase this device…" }).click();
+      await expect(page.getByRole("button", { name: "Yes, erase and sign out" })).toBeVisible();
+      await page.getByRole("button", { name: "Yes, erase and sign out" }).scrollIntoViewIfNeeded();
+      await check(page, "privacy-erase", size.name);
+    });
+
+    test("private or shared device question", async ({ page }) => {
+      await page.goto("/");
+      await page.getByRole("button", { name: "Sign in as alice" }).click();
+      await expect(page.getByRole("heading", { name: "Is this your own device?" })).toBeVisible();
+      await check(page, "device-question", size.name);
+      await page.getByRole("button", { name: "This is a shared device" }).click();
+      await expect(page.getByRole("navigation", { name: "Servers" })).toBeVisible();
+      expect(await page.evaluate(() => localStorage.getItem("bastion.device-kind"))).toBe("shared");
     });
   });
 }

@@ -21,7 +21,13 @@ export interface StateVault {
   /** The saved state for a device, or null if there is none. */
   load(id: string): Promise<Uint8Array | null>;
   save(id: string, bytes: Uint8Array): Promise<void>;
-  /** Remove every key and every saved state. Used on sign-out. */
+  /**
+   * Remove one device's key and saved state. Only for the explicit "erase data from
+   * this device" action and account deletion. Plain sign-out, an expired session
+   * or a forced sign-out must never call this.
+   */
+  remove(id: string): Promise<void>;
+  /** Remove every key and every saved state (all accounts on this browser profile). Same rules as `remove`. */
   clear(): Promise<void>;
 }
 
@@ -106,6 +112,14 @@ export class IdbStateVault implements StateVault {
     } catch {
       throw new Error("vault_unreadable");
     }
+  }
+
+  async remove(id: string): Promise<void> {
+    const db = await this.open();
+    const tx = db.transaction([KEYS, STATE], "readwrite");
+    tx.objectStore(KEYS).delete(id);
+    tx.objectStore(STATE).delete(id);
+    await done(tx);
   }
 
   async clear(): Promise<void> {

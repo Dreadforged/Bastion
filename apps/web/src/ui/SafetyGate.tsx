@@ -58,6 +58,23 @@ export function SafetyGate({ controller, gate, error }: { controller: Controller
     );
   }
 
+  if (gate.kind === "device") {
+    return (
+      <main className="auth">
+        <h1>Is this your own device?</h1>
+        <p>Your encrypted messages are stored only on this device, and we have no copy.</p>
+        <p><strong>Private device.</strong> Signing out keeps your messages here, and they are back when you sign in again with your passkey.</p>
+        <p><strong>Shared device.</strong> Signing out erases your messages and keys from this browser. Use this on a shared or borrowed computer.</p>
+        <div className="controls">
+          <button onClick={() => void controller.chooseDevice("private")}>This is my private device</button>
+          <button onClick={() => void controller.chooseDevice("shared")}>This is a shared device</button>
+        </div>
+        <p className="hint">You can change this later in Privacy.</p>
+        <p><button className="link" onClick={() => void controller.signOut()}>Sign out</button></p>
+      </main>
+    );
+  }
+
   if (gate.kind === "terms") {
     return (
       <main className="auth">
