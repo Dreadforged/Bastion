@@ -2,6 +2,7 @@ import { Permission, type schemas } from "@bastion/shared";
 import { useEffect, useRef, useState } from "react";
 import type { AppState, Controller } from "../lib/controller.js";
 import { sortedChannels, typingUsers } from "../lib/store.js";
+import { ErrorBoundary } from "./ErrorBoundary.js";
 import { Settings } from "./Settings.js";
 import { CallAlerts, CallBar, VoiceParticipants, voiceErrorText } from "./Voice.js";
 
@@ -88,10 +89,12 @@ export function Shell({ controller, state }: { controller: Controller; state: Ap
       </aside>
 
       <main className="content">
-        {view.kind === "channel" && <ChannelView controller={controller} state={state} serverId={view.serverId} channelId={view.channelId} />}
-        {view.kind === "dm" && <DmView controller={controller} state={state} conversationId={view.conversationId} />}
-        {view.kind === "settings" && <Settings controller={controller} />}
-        {view.kind === "none" && <p className="empty">Pick a channel or a conversation.</p>}
+        <ErrorBoundary key={JSON.stringify(view)}>
+          {view.kind === "channel" && <ChannelView controller={controller} state={state} serverId={view.serverId} channelId={view.channelId} />}
+          {view.kind === "dm" && <DmView controller={controller} state={state} conversationId={view.conversationId} />}
+          {view.kind === "settings" && <Settings controller={controller} />}
+          {view.kind === "none" && <p className="empty">Pick a channel or a conversation.</p>}
+        </ErrorBoundary>
       </main>
 
       {server && (
