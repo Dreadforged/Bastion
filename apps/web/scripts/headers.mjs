@@ -9,6 +9,9 @@
 // to 'self', which is right when the API is served from the same domain.
 //   WEB_API_ORIGIN    https origin of the API Worker, if it is not the same domain
 //   WEB_FILES_ORIGIN  https origin that serves uploaded files (the Worker's FILES_ORIGIN)
+//   WEB_UPLOAD_ORIGIN https origin people upload files to. Uploads go straight to R2 through a signed
+//                     URL, so this is the R2 S3 endpoint (https://<account>.r2.cloudflarestorage.com),
+//                     which is not the files origin. Unset, uploads are blocked by the browser.
 //   WEB_LIVEKIT_URL   wss/https URL of the LiveKit server, for calls and streams
 
 function origin(value, name) {
@@ -26,10 +29,13 @@ function origin(value, name) {
 export function buildCsp(env = {}) {
   const api = origin(env.WEB_API_ORIGIN, "WEB_API_ORIGIN");
   const files = origin(env.WEB_FILES_ORIGIN, "WEB_FILES_ORIGIN");
+  const upload = origin(env.WEB_UPLOAD_ORIGIN, "WEB_UPLOAD_ORIGIN");
   const livekit = origin(env.WEB_LIVEKIT_URL, "WEB_LIVEKIT_URL");
   const connect = ["'self'"];
   if (api) connect.push(api, api.replace(/^https:/, "wss:"));
   if (files) connect.push(files);
+  // Upload only: not added to img-src or media-src.
+  if (upload && upload !== files) connect.push(upload);
   if (livekit) connect.push(livekit.replace(/^https:/, "wss:"), livekit.replace(/^wss:/, "https:"));
   const media = ["'self'", "blob:"];
   if (files) media.push(files);

@@ -46,7 +46,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       # Web app on Cloudflare Pages. Set these on each GitHub environment (variables, not secrets):
       #   WEB_PAGES_PROJECT   Pages project name, e.g. the staging and production projects
-      #   WEB_API_ORIGIN, WEB_FILES_ORIGIN, WEB_LIVEKIT_URL   feed the CSP (see apps/web/scripts/headers.mjs)
+      #   WEB_API_ORIGIN, WEB_FILES_ORIGIN, WEB_UPLOAD_ORIGIN, WEB_LIVEKIT_URL   feed the CSP (see apps/web/scripts/headers.mjs)
       #   VITE_API_URL        API address baked into the build; unset means "/api"
       # Until WEB_PAGES_PROJECT is set this step is skipped.
       - name: build web
@@ -60,6 +60,7 @@ jobs:
           VITE_API_URL: ${{ vars.VITE_API_URL }}
           WEB_API_ORIGIN: ${{ vars.WEB_API_ORIGIN }}
           WEB_FILES_ORIGIN: ${{ vars.WEB_FILES_ORIGIN }}
+          WEB_UPLOAD_ORIGIN: ${{ vars.WEB_UPLOAD_ORIGIN }}
           WEB_LIVEKIT_URL: ${{ vars.WEB_LIVEKIT_URL }}
       - name: deploy web
         if: ${{ vars.WEB_PAGES_PROJECT != '' }}

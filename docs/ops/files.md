@@ -80,6 +80,12 @@ Bucket settings:
   leftovers are never served and this rule sweeps them.
 - Keep the bucket private and do not enable a public `r2.dev` URL.
 
+Web app CSP: uploads go from the browser straight to the R2 S3 endpoint, which
+is not `FILES_ORIGIN`. Set the GitHub environment variable `WEB_UPLOAD_ORIGIN`
+to `https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com` so the web app's
+`connect-src` allows it. Without it the browser blocks attachment uploads.
+`WEB_FILES_ORIGIN` is still needed for downloads.
+
 Until `FILES_ORIGIN`, `FILE_URL_SECRET` and all four `R2_*` values are set, the
 `/files` routes are not mounted.
 
