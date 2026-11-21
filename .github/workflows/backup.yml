@@ -1,0 +1,67 @@
+name: Backups
+
+# Nightly encrypted D1 export, and a monthly restore test of the newest export.
+# Needs the GitHub environment secrets and variables listed in docs/ops/backups.md. Until they are
+# set the jobs fail at the first step, which is the signal that backups are not running.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"   # nightly export
+    - cron: "43 4 1 * *"   # monthly restore test
+  workflow_dispatch:
+    inputs:
+      task:
+        description: What to run
+        required: true
+        default: export
+        type: choice
+        options: [export, restore-test]
+      environment:
+        description: Environment
+        required: true
+        default: staging
+        type: choice
+        options: [staging, production]
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    name: backup (${{ inputs.environment || 'production' }})
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment || 'production' }}
+    env:
+      TASK: ${{ inputs.task || (github.event.schedule == '43 4 1 * *' && 'restore-test' || 'export') }}
+      TARGET: ${{ inputs.environment || 'production' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: install age
+        run: sudo apt-get update && sudo apt-get install -y age
+      - name: export
+        if: ${{ env.TASK == 'export' }}
+        run: bash ops/backup/export.sh "$TARGET"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          BACKUP_AGE_RECIPIENT: ${{ vars.BACKUP_AGE_RECIPIENT }}
+          BACKUP_S3_ENDPOINT: ${{ vars.BACKUP_S3_ENDPOINT }}
+          BACKUP_BUCKET: ${{ vars.BACKUP_BUCKET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.BACKUP_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.BACKUP_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+      - name: restore test
+        if: ${{ env.TASK == 'restore-test' }}
+        run: bash ops/backup/restore-test.sh "$TARGET"
+        env:
+          BACKUP_AGE_IDENTITY: ${{ secrets.BACKUP_AGE_IDENTITY }}
+          BACKUP_S3_ENDPOINT: ${{ vars.BACKUP_S3_ENDPOINT }}
+          BACKUP_BUCKET: ${{ vars.BACKUP_BUCKET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.BACKUP_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.BACKUP_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
