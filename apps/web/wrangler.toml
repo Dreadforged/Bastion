@@ -1,0 +1,7 @@
+# Cloudflare Pages project for the web app. Deployed by .github/workflows/deploy.yml with
+# `wrangler pages deploy`. The project must exist first: `wrangler pages project create <name>`.
+#
+# PLACEHOLDER: the real project names are not chosen yet. Nothing here is a real Cloudflare resource.
+name = "bastion-web"
+pages_build_output_dir = "dist"
+compatibility_date = "2025-11-01"

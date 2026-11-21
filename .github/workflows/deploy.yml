@@ -35,3 +35,27 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      # Web app on Cloudflare Pages. Set these on each GitHub environment (variables, not secrets):
+      #   WEB_PAGES_PROJECT   Pages project name, e.g. the staging and production projects
+      #   WEB_API_ORIGIN, WEB_FILES_ORIGIN, WEB_LIVEKIT_URL   feed the CSP (see apps/web/scripts/headers.mjs)
+      #   VITE_API_URL        API address baked into the build; unset means "/api"
+      # Until WEB_PAGES_PROJECT is set this step is skipped.
+      - name: build web
+        if: ${{ vars.WEB_PAGES_PROJECT != '' }}
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo install wasm-pack --locked
+          npm run build:wasm -w @bastion/web
+          npm run build -w @bastion/web
+        env:
+          VITE_API_URL: ${{ vars.VITE_API_URL }}
+          WEB_API_ORIGIN: ${{ vars.WEB_API_ORIGIN }}
+          WEB_FILES_ORIGIN: ${{ vars.WEB_FILES_ORIGIN }}
+          WEB_LIVEKIT_URL: ${{ vars.WEB_LIVEKIT_URL }}
+      - name: deploy web
+        if: ${{ vars.WEB_PAGES_PROJECT != '' }}
+        working-directory: apps/web
+        run: npx wrangler pages deploy dist --project-name "${{ vars.WEB_PAGES_PROJECT }}" --branch main
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
