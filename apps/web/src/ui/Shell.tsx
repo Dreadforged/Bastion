@@ -2,7 +2,11 @@ import { Permission, type schemas } from "@bastion/shared";
 import { useEffect, useRef, useState } from "react";
 import type { AppState, Controller } from "../lib/controller.js";
 import { sortedChannels, typingUsers } from "../lib/store.js";
+import { MAX_ATTACHMENTS, type Attachment } from "../lib/attachments.js";
 import { ErrorBoundary } from "./ErrorBoundary.js";
+import { MemberList } from "./Members.js";
+import { attachFile, Attachments, ReportButton } from "./MessageParts.js";
+import { adminTabs, ServerAdmin } from "./ServerAdmin.js";
 import { Settings } from "./Settings.js";
 import { CallAlerts, CallBar, VoiceParticipants, voiceErrorText } from "./Voice.js";
 
@@ -11,7 +15,7 @@ export function shortId(userId: string): string {
   return userId.slice(-6).toLowerCase();
 }
 
-type View = { kind: "channel"; serverId: string; channelId: string } | { kind: "dm"; conversationId: string } | { kind: "settings" } | { kind: "none" };
+type View = { kind: "channel"; serverId: string; channelId: string } | { kind: "dm"; conversationId: string } | { kind: "settings" } | { kind: "admin"; serverId: string } | { kind: "none" };
 
 export function Shell({ controller, state }: { controller: Controller; state: AppState }) {
   const [serverId, setServerId] = useState<string | null>(null);
@@ -74,6 +78,11 @@ export function Shell({ controller, state }: { controller: Controller; state: Ap
           <>
             <h2>{server.server.name}</h2>
             <ChannelList controller={controller} serverId={server.server.id} state={state} view={view} onPick={pickChannel} />
+            {adminTabs(controller, server.server.id).length > 0 && (
+              <button className={view.kind === "admin" ? "active" : ""} onClick={() => setView({ kind: "admin", serverId: server.server.id })}>
+                Moderation
+              </button>
+            )}
           </>
         ) : (
           <DmList controller={controller} state={state} view={view} onOpen={(conversationId) => setView({ kind: "dm", conversationId })} />
@@ -94,38 +103,25 @@ export function Shell({ controller, state }: { controller: Controller; state: Ap
           {view.kind === "channel" && <ChannelView controller={controller} state={state} serverId={view.serverId} channelId={view.channelId} />}
           {view.kind === "dm" && <DmView controller={controller} state={state} conversationId={view.conversationId} />}
           {view.kind === "settings" && <Settings controller={controller} />}
+          {view.kind === "admin" && <ServerAdmin controller={controller} state={state} serverId={view.serverId} />}
           {view.kind === "none" && <p className="empty">Pick a channel or a conversation.</p>}
         </ErrorBoundary>
       </main>
 
       {server && (
         <aside className="members">
-          <h3>Members ({Object.keys(server.members).length})</h3>
-          <ul>
-            {Object.values(server.members).map((m) => {
-              const status = server.presences[m.userId] ?? "offline";
-              return (
-                <li key={m.userId} className={status}>
-                  <span className="dot" aria-label={status} />
-                  {m.nick ?? shortId(m.userId)}
-                  {m.userId !== state.chat.userId && (
-                    <button
-                      className="link"
-                      onClick={async () => {
-                        const id = await controller.openDm(m.userId);
-                        if (id) {
-                          setServerId(null);
-                          setView({ kind: "dm", conversationId: id });
-                        }
-                      }}
-                    >
-                      Message
-                    </button>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
+          <MemberList
+            controller={controller}
+            state={state}
+            serverId={server.server.id}
+            onMessage={async (userId) => {
+              const id = await controller.openDm(userId);
+              if (id) {
+                setServerId(null);
+                setView({ kind: "dm", conversationId: id });
+              }
+            }}
+          />
           <button
             onClick={async () => {
               const invite = await controller.createInvite(server.server.id);
@@ -235,12 +231,14 @@ function ChannelView({ controller, state, serverId, channelId }: { controller: C
             <li key={m.id}>
               <b>{shortId(m.authorId)}</b> <time>{new Date(m.createdAt).toLocaleTimeString()}</time>
               {m.editedAt !== null && <small> (edited)</small>}
-              <p className={payload ? "" : "locked"}>{payload ? payload.text : "This device cannot read this message."}</p>
+              {(!payload || payload.text !== "") && <p className={payload ? "" : "locked"}>{payload ? payload.text : "This device cannot read this message."}</p>}
+              {payload && payload.attachments.length > 0 && <Attachments controller={controller} list={payload.attachments} />}
               {(m.authorId === me || canModerate) && (
                 <button className="link" onClick={() => void controller.deleteMessage(serverId, channelId, m.id)}>
                   Delete
                 </button>
               )}
+              {m.authorId !== me && payload && <ReportButton controller={controller} serverId={serverId} channelId={channelId} message={m} text={payload.text} />}
             </li>
           );
         })}
@@ -251,7 +249,8 @@ function ChannelView({ controller, state, serverId, channelId }: { controller: C
         disabled={!canSend}
         placeholder={canSend ? `Message #${channel.name}` : "You cannot send messages here"}
         onTyping={() => void controller.sendTyping(serverId, channelId)}
-        onSend={(text) => controller.sendMessage(serverId, channelId, text)}
+        onSend={(text, attachments) => controller.sendMessage(serverId, channelId, text, attachments)}
+        {...(controller.can(serverId, channelId, Permission.ATTACH_FILES) ? { onAttach: (file: File) => attachFile(controller, serverId, channelId, file) } : {})}
       />
     </>
   );
@@ -325,21 +324,82 @@ function DmView({ controller, state, conversationId }: { controller: Controller;
   );
 }
 
-function Composer(props: { disabled?: boolean; placeholder: string; onSend: (text: string) => Promise<void>; onTyping?: () => void }) {
+function Composer(props: {
+  disabled?: boolean;
+  placeholder: string;
+  onSend: (text: string, attachments: Attachment[]) => Promise<void>;
+  onTyping?: () => void;
+  /** Encrypt and upload one file. Without it there is no attach button. */
+  onAttach?: (file: File) => Promise<Attachment | undefined>;
+}) {
   const [text, setText] = useState("");
+  const [files, setFiles] = useState<Attachment[]>([]);
+  const [uploading, setUploading] = useState(0);
+  const [problem, setProblem] = useState<string | null>(null);
   const lastTyping = useRef(0);
+  const picker = useRef<HTMLInputElement>(null);
+  const disabled = props.disabled ?? false;
+
+  async function pick(list: FileList | null) {
+    if (!list || !props.onAttach) return;
+    setProblem(null);
+    let count = files.length;
+    for (const file of Array.from(list)) {
+      if (count >= MAX_ATTACHMENTS) {
+        setProblem(`At most ${MAX_ATTACHMENTS} files per message.`);
+        break;
+      }
+      setUploading((n) => n + 1);
+      const done = await props.onAttach(file);
+      setUploading((n) => n - 1);
+      if (done) {
+        count++;
+        setFiles((f) => [...f, done]);
+      } else setProblem(`Could not upload ${file.name}. Files can be up to 25 MB.`);
+    }
+    if (picker.current) picker.current.value = "";
+  }
+
   return (
     <form
       className="composer"
       onSubmit={(e) => {
         e.preventDefault();
         const t = text;
+        const attached = files;
         setText("");
-        void props.onSend(t);
+        setFiles([]);
+        void props.onSend(t, attached);
       }}
     >
+      {(files.length > 0 || uploading > 0 || problem) && (
+        <div className="pending-files">
+          {files.map((f) => (
+            <span key={f.id} className="chip">
+              <span className="file-name">{f.name}</span>
+              <button type="button" className="link" aria-label={`Remove ${f.name}`} onClick={() => setFiles((list) => list.filter((x) => x.id !== f.id))}>
+                ×
+              </button>
+            </span>
+          ))}
+          {uploading > 0 && <small>Encrypting and uploading…</small>}
+          {problem && (
+            <small role="alert" className="error">
+              {problem}
+            </small>
+          )}
+        </div>
+      )}
+      {props.onAttach && (
+        <>
+          <input ref={picker} type="file" multiple hidden aria-label="Choose files to attach" onChange={(e) => void pick(e.target.files)} />
+          <button type="button" disabled={disabled || uploading > 0} title="Attach file" onClick={() => picker.current?.click()}>
+            Attach file
+          </button>
+        </>
+      )}
       <input
-        disabled={props.disabled ?? false}
+        disabled={disabled}
         value={text}
         placeholder={props.placeholder}
         maxLength={8000}
@@ -352,7 +412,7 @@ function Composer(props: { disabled?: boolean; placeholder: string; onSend: (tex
           }
         }}
       />
-      <button disabled={(props.disabled ?? false) || text.trim() === ""}>Send</button>
+      <button disabled={disabled || uploading > 0 || (text.trim() === "" && files.length === 0)}>Send</button>
     </form>
   );
 }

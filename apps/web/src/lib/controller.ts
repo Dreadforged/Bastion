@@ -5,6 +5,7 @@ import { AuthClient } from "./auth.js";
 import type { DeviceKind, DevicePrefs } from "./device.js";
 import { decodeBundle, E2ee, type DecryptedMessage, type MlsClient, type PersistedMeta } from "./e2ee.js";
 import { Gateway, type GatewayOptions, type GatewayStatus } from "./gateway.js";
+import { downloadAttachment, uploadChannelFile, type Attachment } from "./attachments.js";
 import { Api, ApiError, newIdempotencyKey } from "./http.js";
 import { buildChatExport, type ChatExport } from "./privacy.js";
 import { gateFor, type Gate } from "./safety.js";
@@ -55,6 +56,8 @@ export interface ControllerOptions {
   /** LiveKit room factory for voice. Without it voice and calls are unavailable. */
   voiceRoom?: Pick<CallOptions, "createRoom" | "createSink" | "e2eeSupported">;
   gatewayUrl: string;
+  /** fetch for storage uploads and downloads. These never carry our access token. */
+  uploadFetch?: (input: string, init?: RequestInit) => Promise<Response>;
   createSocket?: GatewayOptions["createSocket"];
 }
 
@@ -548,13 +551,13 @@ export class Controller {
     }
   }
 
-  async sendMessage(serverId: string, channelId: string, text: string): Promise<void> {
+  async sendMessage(serverId: string, channelId: string, text: string, attachments: Attachment[] = []): Promise<void> {
     const body = text.trim();
-    if (!body) return;
+    if (!body && attachments.length === 0) return;
     await this.guard(async () => {
       if (!this.e2ee) throw new Error("encryption_not_ready");
       const post = async () => {
-        const { ciphertext, epoch, payload } = await this.e2ee!.encryptForChannel(channelId, body);
+        const { ciphertext, epoch, payload } = await this.e2ee!.encryptForChannel(channelId, body, attachments);
         const sent = await this.o.api.post<schemas.Message>(
           `/servers/${serverId}/channels/${channelId}/messages`,
           { ciphertext, epoch },
@@ -581,12 +584,94 @@ export class Controller {
     });
   }
 
+  /** Encrypt a file on this device and upload it for a channel. Returns what to attach to the message. */
+  uploadAttachment(serverId: string, channelId: string, file: { name: string; type: string; bytes: Uint8Array<ArrayBuffer> }) {
+    return this.guard(() => uploadChannelFile(this.o.api, { serverId, channelId }, file, this.o.uploadFetch));
+  }
+
+  /** Download and decrypt an attachment. */
+  fetchAttachment(attachment: Attachment) {
+    return this.guard(() => downloadAttachment(this.o.api, attachment, this.o.uploadFetch));
+  }
+
   deleteMessage(serverId: string, channelId: string, messageId: string) {
     return this.guard(() => this.o.api.delete(`/servers/${serverId}/channels/${channelId}/messages/${messageId}`));
   }
 
   sendTyping(serverId: string, channelId: string) {
     return this.o.api.post(`/servers/${serverId}/channels/${channelId}/typing`).catch(() => undefined);
+  }
+
+  // ---------------------------------------------------------------- moderation
+
+  /** Server-wide permission, ignoring channel overrides. */
+  canServer(serverId: string, flag: bigint): boolean {
+    return this.can(serverId, "", flag);
+  }
+
+  /** Reports for the channels this moderator can handle. */
+  reports(serverId: string, status?: schemas.ReportStatus) {
+    return this.o.api.get<schemas.Report[]>(`/servers/${serverId}/reports`, { status, limit: 50 });
+  }
+
+  setReportStatus(serverId: string, reportId: string, status: schemas.ReportStatus, reason?: string) {
+    return this.o.api.patch<schemas.Report>(`/servers/${serverId}/reports/${reportId}`, { status, ...(reason ? { reason } : {}) });
+  }
+
+  /** Report messages from a channel. The text is what this device decrypted; moderators can read it. */
+  reportMessages(serverId: string, channelId: string, category: schemas.ReportCategory, messages: { id: string; content: string }[], note?: string) {
+    return this.guard(() => this.o.api.post(`/servers/${serverId}/reports`, { channelId, category, messages, ...(note ? { note } : {}) }));
+  }
+
+  auditLog(serverId: string, filter: { action?: schemas.AuditAction; before?: string } = {}) {
+    return this.o.api.get<schemas.AuditLogEntry[]>(`/servers/${serverId}/audit-log`, { ...filter, limit: 50 });
+  }
+
+  bans(serverId: string) {
+    return this.o.api.get<schemas.Ban[]>(`/servers/${serverId}/bans`, { limit: 100 });
+  }
+
+  kick(serverId: string, userId: string, reason?: string) {
+    return this.guard(() => this.o.api.delete(`/servers/${serverId}/members/${userId}`, reason ? { reason } : {}));
+  }
+
+  timeout(serverId: string, userId: string, seconds: number, reason?: string) {
+    return this.guard(() => this.o.api.put(`/servers/${serverId}/members/${userId}/timeout`, { seconds, ...(reason ? { reason } : {}) }));
+  }
+
+  removeTimeout(serverId: string, userId: string) {
+    return this.guard(() => this.o.api.delete(`/servers/${serverId}/members/${userId}/timeout`, {}));
+  }
+
+  ban(serverId: string, userId: string, opts: { reason?: string; deleteMessageSeconds?: number } = {}) {
+    return this.guard(() =>
+      this.o.api.put(`/servers/${serverId}/bans/${userId}`, {
+        ...(opts.reason ? { reason: opts.reason } : {}),
+        deleteMessageSeconds: opts.deleteMessageSeconds ?? 0,
+      }),
+    );
+  }
+
+  unban(serverId: string, userId: string) {
+    return this.guard(() => this.o.api.delete(`/servers/${serverId}/bans/${userId}`, {}));
+  }
+
+  createRole(serverId: string, name: string, permissions: bigint) {
+    return this.guard(() => this.o.api.post<schemas.Role>(`/servers/${serverId}/roles`, { name, permissions: permissions.toString() }));
+  }
+
+  updateRole(serverId: string, roleId: string, change: { name?: string; permissions?: bigint }) {
+    const body = { ...(change.name !== undefined ? { name: change.name } : {}), ...(change.permissions !== undefined ? { permissions: change.permissions.toString() } : {}) };
+    return this.guard(() => this.o.api.patch<schemas.Role>(`/servers/${serverId}/roles/${roleId}`, body));
+  }
+
+  deleteRole(serverId: string, roleId: string) {
+    return this.guard(() => this.o.api.delete(`/servers/${serverId}/roles/${roleId}`));
+  }
+
+  setMemberRole(serverId: string, userId: string, roleId: string, on: boolean) {
+    const path = `/servers/${serverId}/members/${userId}/roles/${roleId}`;
+    return this.guard(() => (on ? this.o.api.put(path) : this.o.api.delete(path)));
   }
 
   // ---------------------------------------------------------------- privacy and data

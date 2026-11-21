@@ -66,3 +66,48 @@ button.link { background: none; border: 0; padding: 0 .25rem; color: LinkText; t
 .code { overflow-wrap: anywhere; }
 .content header { min-width: 0; }
 .content header.with-action h2 { min-width: 0; margin-right: .5rem; }
+
+/* moderation, members and attachments */
+.sidebar > button:not(.link) { margin: .5rem 0; max-width: 100%; }
+.member-list li { padding: .15rem 0; }
+.member-tools { margin: .35rem 0; padding: .5rem; border: 1px solid #8886; border-radius: .4rem; display: grid; gap: .4rem; font-size: .85rem; }
+.member-tools form { display: grid; gap: .4rem; }
+.member-tools p { margin: 0; }
+.member-tools label, .report-form label, .role-form label:not(.check), .toolbar label { display: grid; gap: .15rem; }
+.member-tools input:not([type]), .member-tools select, .report-form input, .report-form select, .role-form input:not([type]) { min-width: 0; max-width: 100%; box-sizing: border-box; }
+fieldset { min-width: 0; border: 1px solid #8884; border-radius: .4rem; margin: 0; padding: .4rem .6rem; }
+.check { display: flex !important; align-items: center; gap: .4rem; }
+.controls { display: flex; flex-wrap: wrap; gap: .4rem; }
+.report-form { display: grid; gap: .4rem; max-width: 24rem; margin: .25rem 0; }
+.report-form p { margin: 0; }
+.attachments { list-style: none; padding: 0; margin: .15rem 0; }
+.attachments li { overflow-wrap: anywhere; }
+.file-name { overflow-wrap: anywhere; }
+.composer { flex-wrap: wrap; align-items: center; }
+.composer .pending-files { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; }
+.chip { display: inline-flex; align-items: center; gap: .25rem; max-width: 100%; border: 1px solid #8886; border-radius: 1rem; padding: .1rem .5rem; font-size: .85rem; }
+.composer > input:not([hidden]) { flex: 1 1 8rem; }
+.admin { display: flex; flex-direction: column; min-height: 0; flex: 1; min-width: 0; }
+.admin header { border-bottom: 1px solid #8884; }
+.admin .tabs { display: flex; flex-wrap: wrap; gap: .4rem; padding: .5rem 1rem; border-bottom: 1px solid #8884; }
+.admin .tabs button.active { outline: 2px solid highlight; }
+.admin-body { padding: 1rem; overflow: auto; min-width: 0; flex: 1; }
+.admin .toolbar { display: flex; flex-wrap: wrap; gap: .75rem; align-items: end; margin-bottom: .5rem; }
+.admin .cards { list-style: none; padding: 0; margin: 0; display: grid; gap: .75rem; }
+.admin .card { border: 1px solid #8886; border-radius: .5rem; padding: .75rem; overflow-wrap: anywhere; min-width: 0; }
+.admin .card p { margin: .25rem 0; }
+.admin .card-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .5rem; }
+.admin .reported { list-style: none; margin: .5rem 0; padding: 0 0 0 .75rem; border-left: 3px solid #8886; }
+.admin .reported p { white-space: pre-wrap; }
+.admin .note { font-style: italic; }
+.admin .audit { list-style: none; padding: 0; margin: 0 0 1rem; }
+.admin .audit li { padding: .5rem 0; border-bottom: 1px solid #8883; overflow-wrap: anywhere; }
+.admin .audit p { margin: .1rem 0; }
+.roles { display: flex; flex-wrap: wrap; gap: 1rem; }
+.role-editor { flex: 3 1 14rem; min-width: 0; }
+.role-list { flex: 1 1 8rem; max-width: 12rem; list-style: none; padding: 0; margin: 0; display: grid; gap: .25rem; align-content: start; min-width: 0; }
+.role-list button { width: 100%; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.role-list button.active { outline: 2px solid highlight; }
+.role-form { display: grid; gap: .6rem; max-width: 28rem; min-width: 0; }
+.role-form h3 { margin: 0; overflow-wrap: anywhere; }
+.role-form input:not([type]) { width: 100%; }

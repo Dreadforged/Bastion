@@ -592,11 +592,11 @@ export class E2ee {
   }
 
   /** Encrypt for a channel; the caller posts the result to the server's message route. */
-  async encryptForChannel(channelId: string, text: string): Promise<{ ciphertext: string; epoch: number; payload: MessagePayload }> {
+  async encryptForChannel(channelId: string, text: string, attachments: MessagePayload["attachments"] = []): Promise<{ ciphertext: string; epoch: number; payload: MessagePayload }> {
     const id = this.channelConv.get(channelId);
     if (!id || !this.isKnown(id)) throw new Error("conversation_not_ready");
     const gid = this.groupId(id);
-    const payload = MessagePayload.parse({ text });
+    const payload = MessagePayload.parse({ text, attachments });
     const bytes = this.o.mls.encrypt(gid, new TextEncoder().encode(JSON.stringify(payload)));
     // Save the advanced ratchet before the ciphertext leaves.
     await this.persist();
