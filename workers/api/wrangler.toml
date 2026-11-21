@@ -4,7 +4,8 @@ compatibility_date = "2025-11-01"
 compatibility_flags = ["nodejs_compat"]
 
 # Bindings are not inherited by [env.*] blocks, so each environment repeats them.
-# Replace the placeholder database ids after running `wrangler d1 create`.
+# Replace the placeholder database ids after running `wrangler d1 create`. The all-zero ids are
+# PLACEHOLDERS, not real resources; the deploy workflow's migration step fails until they are replaced.
 
 # ---------------------------------------------------------------- local dev
 # Voice and files are off until these are set (see docs/ops):
